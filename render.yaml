@@ -1,4 +1,6 @@
-environment: python
+# ملف نشر Render (Blueprint) — تنسيقه حسب المرجع الرسمي:
+# https://render.com/docs/blueprint-spec
+# مفاتيح الجذر المسموح بها هي: services / databases / envVarGroups / projects / ungrouped فقط.
 
 services:
   - type: web
@@ -9,12 +11,16 @@ services:
     buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python -u bot.py
     healthCheckPath: /healthz
-    autoDeploy: true
+    # autoDeploy مهجور الآن — البديل الرسمي هو autoDeployTrigger
+    autoDeployTrigger: commit
     envVars:
       # ⬇️ هذه القيم تُدخل سرّاً في لوحة Render (sync: false = لا تُحفظ في الملف)
       - key: DISCORD_TOKEN
         sync: false
       - key: GUILD_ID
+        sync: false
+      # قائمة بيضاء: البوت يعمل في هذه السيرفرات فقط ويخرج من غيرها
+      - key: ALLOWED_GUILD_IDS
         sync: false
       - key: PUBLIC_URL
         sync: false

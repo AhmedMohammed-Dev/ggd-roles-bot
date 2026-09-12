@@ -14,6 +14,7 @@
 | ✅ | ملف `.env` **جاهز ومنتظر التوكن فقط** (وهو مستثنى من الرفع على GitHub) |
 | ✅ | 30 اختباراً تنجح كلها + ملف فحص جاهزية `check_setup.py` + ضبط تلقائي `setup_discord.py` |
 | ✅ | ملف تشغيل بضغطة واحدة `START.bat` (ويندوز) و `start.sh` (لينكس/ماك) |
+| ✅ | ملف `push.bat` يرفع الكود على GitHub بنفسه (باسم مستخدمك) |
 | ✅ | إعداد Render (`render.yaml`) و Dockerfile للحاويات |
 | ✅ | مستودع Git محلي جاهز مع أول حفظة (Commit) — ينقصه الرفع فقط |
 
@@ -134,8 +135,12 @@ https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&
 
 ### 4.1 ارفع المشروع على GitHub (مستودع **خاص**)
 
-أنشئ المستودع فارغاً من <https://github.com/new> — الاسم `ggd-roles-bot`، والنوع **Private** ⚠️.
-ثم من داخل مجلد المشروع (المستودع محضّر مسبقاً، فأرسل هذه الأوامر كما هي):
+1. أنشئ المستودع **فارغاً** من <https://github.com/new> — الاسم `ggd-roles-bot` بالضبط،
+   والنوع **Private** ⚠️ (ولا تُضف README ولا .gitignore، المستودع يجب أن يبدأ فارغاً).
+2. اضغط مرتين على الملف **`push.bat`** في مجلد المشروع (يعمل كل شيء وحده):
+   يكتب لك اسم مستخدمك على GitHub → يربط المستودع → يرفع الكود.
+
+أو يدوياً من داخل مجلد المشروع:
 
 ```bash
 git remote add origin https://github.com/USERNAME/ggd-roles-bot.git
@@ -144,26 +149,34 @@ git push -u origin main
 ```
 
 > 💡 ملف `.gitignore` يمنع رفع `.env` تلقائياً — أي أن التوكن **لن** يصل إلى GitHub.
-> تأكد من ذلك: افتح المستودع ونشّط النظر، لن تجد ملف `.env`.
+> تأكد من ذلك: افتح المستودع وشاهد الملفات، لن تجد ملف `.env`.
+> (صندوق `git status` في المشروع نظيف، ولم يُسجّل أي ملف سرّي.)
 
-### 4.2 انشر على Render
+### 4.2 انشر على Render — بطريقة Blueprint (أسهل طريقة)
 
-1. افتح <https://dashboard.render.com> → **New +** → **Web Service**.
-2. اختر **Build and deploy from a Git repository** → اربط حساب GitHub → اختر المستودع.
-3. Render سيقرأ `render.yaml` ويضبط كل شيء تلقائياً. تأكّد فقط أن:
-   - **Start Command:** `python -u bot.py`
-   - **Health Check Path:** `/healthz`
-4. انزل إلى **Environment** → **Add Environment Variable** وأضف:
+المشروع فيه ملف `render.yaml`، وهذا معناه أن Render ستضبط كل شيء (الأمر، المنفذ، فحص الصحة)
+تلقائياً — لن تكتب أي إعداد يدوياً:
+
+1. افتح <https://dashboard.render.com> → **New +** → اختر **Blueprint** (وليس Web Service).
+2. اربط حساب GitHub → اختر مستودع `ggd-roles-bot`.
+3. Render ستقرأ `render.yaml` وتطلب منك قيم المتغيرات السرّية، الصقها كما يلي:
 
    | المفتاح (Key) | القيمة (Value) |
    |---|---|
-   | `DISCORD_TOKEN` | التوكن (الصقه هنا أيضاً) |
-   | `GUILD_ID` | رقم سيرفرك |
-   | `PUBLIC_URL` | رابط خدمتك بعد النشر، مثل `https://ggd-roles-bot.onrender.com` |
+   | `DISCORD_TOKEN` | التوكن (نفس اللي في `.env`) |
+   | `GUILD_ID` | `1546676344967012383` |
+   | `ALLOWED_GUILD_IDS` | `1546676344967012383` |
+   | `PUBLIC_URL` | `https://ggd-roles-bot.onrender.com` |
+   | `HEALTH_TOKEN` | اتركه فارغاً |
 
-5. اضغط **Deploy Web Service** وانتظر حتى تصبح الحالة **Live** (2–4 دقائق).
-6. انسخ الرابط من أعلى الصفحة، وضعه في `PUBLIC_URL` إن لم يكن مضبوطاً، ثم **Manual Deploy → Deploy latest commit**.
-7. اذهب إلى ديسكورد واكتب `/roles` ✅ — البوت الآن يعمل 24/7 بلا جهازك.
+4. اضغط **Apply** / **Create Resources** وانتظر حتى تصبح الحالة **Live** (‏2–4 دقائق).
+5. لو الرابط اللي ظهر مختلف عن المكتوب في `PUBLIC_URL` (مثل `ggd-roles-bot-ab12.onrender.com`):
+   انسخه → **Environment** → عدّل `PUBLIC_URL` → **Save** (ستُعاد النشرة وحدها).
+6. اذهب إلى ديسكورد واكتب `/roles` ✅ — البوت الآن يعمل 24/7 بلا جهازك.
+
+> **نسيت خطوة أو لا تريد Blueprint؟** اختر **New + → Web Service** وربط المستودع يدوياً،
+> والضبط حينها: Build `pip install -r requirements.txt` — Start `python -u bot.py` — Health `/healthz`.
+> ولا تنسَ كل متغيرات الجدول أعلاه من **Environment**.
 
 > **لماذا `PUBLIC_URL` مهم؟** خطة Render المجانية تُنيّم الخدمة بعد **15 دقيقة** بلا زيارات.
 > الكود يزور نفسه كل **10 دقائق** تلقائياً فيبقى مستيقظاً — وهذا ما يجعل 24/7 ممكناً مجاناً.
