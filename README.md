@@ -27,6 +27,7 @@
 ggd-roles-bot/
 ├── bot.py            ← كل الكود (الأدوار + الأزرار + Flask)
 ├── STEPS.md          ← 📌 الخطوات المتبقية عليك بالترتيب وبأبسط شكل (ابدأ من هنا)
+├── setup_discord.py  ← ⚙️ يتأكد من التوكن ويضبط GUILD_ID وطبع رابط الدعوة تلقائياً
 ├── check_setup.py    ← يفحص التوكن ويتصل بديسكورد للتأكد أنه يعمل
 ├── START.bat         ← تشغيل بضغطة واحدة في ويندوز
 ├── start.sh          ← تشغيل بضغطة واحدة في لينكس/ماك
@@ -76,6 +77,7 @@ python -m venv .venv
 source .venv/bin/activate          # على ويندوز: .venv\Scripts\activate
 pip install -r requirements.txt
 
+python setup_discord.py            # يضبط GUILD_ID تلقائياً ويطبع رابط الدعوة
 python check_setup.py              # يتأكد أن التوكن موجود ويعمل (اتصال حقيقي بديسكورد)
 python bot.py
 ```
