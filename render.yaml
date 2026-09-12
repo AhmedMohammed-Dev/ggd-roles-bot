@@ -1,0 +1,30 @@
+environment: python
+
+services:
+  - type: web
+    name: ggd-roles-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: python -u bot.py
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # ⬇️ هذه القيم تُدخل سرّاً في لوحة Render (sync: false = لا تُحفظ في الملف)
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: HEALTH_TOKEN
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: ENABLE_PREFIX_COMMANDS
+        value: "false"
+      - key: ACTION_COOLDOWN_SECONDS
+        value: "1"
+      - key: SELF_PING_SECONDS
+        value: "600"

@@ -1,0 +1,18 @@
+# ملفات سرّية — لا ترفعها إلى GitHub أبداً
+.env
+.env.*
+!.env.example
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.python-version
+
+# أدوات ومحرّرات
+.idea/
+.vscode/
+.DS_Store
