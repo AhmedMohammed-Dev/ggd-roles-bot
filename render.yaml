@@ -14,7 +14,9 @@ services:
     # أوقفنا النشر التلقائي عن قصد: المرجع الرسمي ينصح بـ off لخدمات زر «Deploy to Render»
     # حتى لا تُعيد كل حفظة (push) نشر البوت الشغّال فتقطعه بلا داعٍ.
     # لتحديث البوت لاحقاً: لوحة Render → خدمتك → Manual Deploy.
-    autoDeployTrigger: off
+    # ⚠️ علامتا التنصيص مهمتان: YAML يفهم off بلا تنصيص على أنها قيمة منطقية false
+    #    فيرفضها Render لأن القيم المسموحة هي: commit / off / checksPass
+    autoDeployTrigger: "off"
     envVars:
       # ⬇️ الحقل الوحيد المطلوب منك: توكن البوت (يُكتب سرّاً في لوحة Render، ولا يُحفظ في الملف)
       - key: DISCORD_TOKEN

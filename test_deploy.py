@@ -393,6 +393,54 @@ class TestCommandLine(unittest.TestCase):
         self.assertNotIn("FAKE-RENDER-KEY", buffer.getvalue())
 
 
+class TestRenderBlueprint(unittest.TestCase):
+    """ملف render.yaml هو ما سينفّذه Render حرفياً — خطأ صياغة فيه يوقف النشر كله."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import yaml  # noqa: F401  (اختياري: للتطوير فقط، وليس من متطلبات البوت)
+        except ImportError:  # pragma: no cover
+            raise unittest.SkipTest("PyYAML غير مثبَّت — تخطّي فحص صياغة render.yaml")
+        cls.text = (Path(deploy.__file__).parent / "render.yaml").read_text(encoding="utf-8")
+        cls.spec = __import__("yaml").safe_load(cls.text)
+
+    def test_root_keys_are_officially_allowed(self):
+        """Render ترفض أي مفتاح في الجذر غير هذه القائمة (سبب شائع لفشل النشر)."""
+        allowed = {"services", "databases", "envVarGroups", "projects", "ungrouped"}
+        self.assertTrue(set(self.spec) <= allowed, f"مفتاح غير مسموح: {set(self.spec) - allowed}")
+
+    def test_single_free_web_service_with_health_check(self):
+        services = self.spec["services"]
+        self.assertEqual(len(services), 1)
+        service = services[0]
+        self.assertEqual(service["type"], "web")
+        self.assertEqual(service["runtime"], "python")
+        self.assertEqual(service["plan"], "free")
+        self.assertEqual(service["healthCheckPath"], "/healthz")
+        self.assertEqual(service["buildCommand"], deploy.BUILD_COMMAND)
+        self.assertEqual(service["startCommand"], deploy.START_COMMAND)
+        self.assertIn(service["region"], deploy.VALID_REGIONS)
+
+    def test_only_the_token_is_asked_from_the_user(self):
+        """النشر بنقرة واحدة: حقل واحد فقط يملؤه المستخدم كي لا يتعب أو يخطئ."""
+        service = self.spec["services"][0]
+        secret_fields = [v["key"] for v in service["envVars"] if v.get("sync") is False]
+        self.assertEqual(secret_fields, ["DISCORD_TOKEN"])
+
+    def test_security_lock_and_guild_are_preset(self):
+        env = {v["key"]: v.get("value") for v in self.spec["services"][0]["envVars"]}
+        self.assertTrue(env.get("ALLOWED_GUILD_IDS", "").isdigit(), "القفل الأمني مطلوب")
+        self.assertEqual(env["GUILD_ID"], env["ALLOWED_GUILD_IDS"])
+
+    def test_auto_deploy_is_off_so_a_push_never_breaks_a_running_bot(self):
+        self.assertEqual(self.spec["services"][0]["autoDeployTrigger"], "off")
+
+    def test_file_itself_contains_no_secret(self):
+        for description, pattern in deploy.SECRET_PATTERNS:
+            self.assertIsNone(pattern.search(self.text), f"render.yaml يحتوي {description}")
+
+
 class TestSecretsFileTemplate(unittest.TestCase):
     def test_template_ships_without_any_value(self):
         path = Path(deploy.__file__).parent / ".deploy_secrets.example"
