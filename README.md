@@ -3,6 +3,14 @@
 بوت ديسكورد تفاعلي يشرح **أدوار لعبة Goose Goose Duck** بالعربي مع صورها، بواجهة أزرار
 (الأزرار والشرح تظهر **لك وحدك** — لا يراها أحد غيرك في الروم).
 
+### 🚀 النشر على Render بنقرة واحدة
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/AhmedMohammed-Dev/ggd-roles-bot)
+
+الزر يقرأ `render.yaml` فيضبط كل شيء تلقائياً، ولا يسألك إلا عن **حقل واحد**:
+`DISCORD_TOKEN` (توكن بوتك). ملاحظة: المستودع خاص حالياً — الزر يعمل فوراً بعد أن تجعله
+عاماً (Settings → Change visibility) أو بعد أن تسمح لـ Render بالوصول إليه مرة واحدة.
+
 ---
 
 ## ✨ المميزات
@@ -32,7 +40,7 @@ ggd-roles-bot/
 ├── START.bat         ← تشغيل بضغطة واحدة في ويندوز
 ├── start.sh          ← تشغيل بضغطة واحدة في لينكس/ماك
 ├── deploy.py         ← 🚀 ننشر بأمر واحد (GitHub + Render) بدل كل الخطوات اليدوية
-├── push.bat          ← بديل قديم: يرفع الكود على GitHub فقط
+├── push.bat          ← بديل قديم: يرفع الكود على GitHub فقط (استخدم deploy.py بدلاً منه)
 ├── .env              ← 🔑 املأ التوكن هنا (سرّي — لا يُرفع إلى GitHub)
 ├── .deploy_secrets.example ← نموذج مفاتيح النشر (انسخه باسم .deploy_secrets لو أردت أمراً واحداً)
 ├── test_bot.py       ← 30 اختباراً يعمل بدون توكن ولا إنترنت
