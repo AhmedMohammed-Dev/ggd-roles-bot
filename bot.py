@@ -136,8 +136,27 @@ if not KEEPALIVE_PATH.startswith("/"):
 # إن وُضع هذا المفتاح، لن يستجيب مسار الفحص إلا لمن يرسله في الهيدر X-Health-Key (حماية إضافية)
 HEALTH_TOKEN: str = env_str("HEALTH_TOKEN")
 
+def resolve_public_url() -> str:
+    """يجد رابط التطبيق العام تلقائياً بدل أن تكتبه يدوياً (وقد تكتبه خطأً).
+
+    الترتيب:
+      1) PUBLIC_URL          — إن كتبته بنفسك (أي منصّة أو خادم).
+      2) RENDER_EXTERNAL_URL — تضبطه Render وحدها لكل خدمة ويب، فهو صحيح دائماً
+                               حتى لو تغيّر اسم النطاق الفرعي.
+    ولو جاء الرابط بلا ‎https://‎ نُضيفه، لأن هذا أشهر خطأ عند النسخ اليدوي.
+    """
+    for name in ("PUBLIC_URL", "RENDER_EXTERNAL_URL"):
+        value = (os.getenv(name) or "").strip().rstrip("/")
+        if not value:
+            continue
+        if not value.startswith(("http://", "https://")):
+            value = "https://" + value
+        return value
+    return ""
+
+
 # إذا نُشر البوت على رابط عام، البوت "يقرع" نفسه كل فترة حتى لا ينام السيرفر المجاني
-PUBLIC_URL: str = env_str("PUBLIC_URL")
+PUBLIC_URL: str = resolve_public_url()
 SELF_PING_SECONDS: int = max(60, env_int("SELF_PING_SECONDS", 600))
 
 # أمر !roles يحتاج تفعيل Message Content Intent في لوحة المطوّرين. اتركه false إن أردت أعلى أمان.
@@ -931,7 +950,10 @@ def start_keepalive_server() -> None:
 def start_self_ping() -> None:
     """يقرع البوت لنفسه كل فترة حتى لا توقفه منصّات الاستضافة المجانية عند الخمول."""
     if not PUBLIC_URL:
-        log.info("ℹ️ لم يتم ضبط PUBLIC_URL — تخطّي القرع الذاتي (استخدم UptimeRobot بدلاً منه).")
+        log.info(
+            "ℹ️ لم أجد رابطاً عاماً (PUBLIC_URL أو RENDER_EXTERNAL_URL) — "
+            "تخطّي القرع الذاتي، أو استخدم UptimeRobot مجاناً."
+        )
         return
 
     url = PUBLIC_URL.rstrip("/") + KEEPALIVE_PATH

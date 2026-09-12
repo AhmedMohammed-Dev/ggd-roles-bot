@@ -47,7 +47,10 @@ if errorlevel 1 (
 
 echo.
 echo [OK] The code is on GitHub. The .env file was NOT uploaded (it is ignored).
-echo      Next: dashboard.render.com -^> New + -^> Blueprint -^> pick this repo.
+echo.
+echo  SIMPLER: skip all dashboard steps -^> fill .deploy_secrets then run:
+echo      python deploy.py
+echo  (or continue manually: dashboard.render.com -^> New + -^> Blueprint -^> pick this repo)
 echo.
 pause
 exit /b 0

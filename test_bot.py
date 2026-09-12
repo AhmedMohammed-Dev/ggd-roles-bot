@@ -9,6 +9,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import discord
 
@@ -259,6 +260,46 @@ class TestSecurity(unittest.TestCase):
         rules = (project / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn(".env", [rule.strip() for rule in rules])
         self.assertIn("!.env.example", [rule.strip() for rule in rules])
+
+
+class TestPublicUrlResolution(unittest.TestCase):
+    """البوت يجد رابط نفسه تلقائياً بدل أن تكتبه يدوياً (وتكتبه خطأً)."""
+
+    KEYS = ("PUBLIC_URL", "RENDER_EXTERNAL_URL")
+
+    def resolve(self, **values: str) -> str:
+        env = {key: values.get(key, "") for key in self.KEYS}
+        with mock.patch.dict(os.environ, env, clear=True):
+            return bot.resolve_public_url()
+
+    def test_explicit_public_url_wins(self):
+        self.assertEqual(
+            self.resolve(PUBLIC_URL="https://mine.example.com",
+                        RENDER_EXTERNAL_URL="https://render-provided.onrender.com"),
+            "https://mine.example.com",
+        )
+
+    def test_falls_back_to_the_variable_render_sets_itself(self):
+        """Render تضبط RENDER_EXTERNAL_URL، فوُجد الرابط بلا أي إعداد يدوي."""
+        self.assertEqual(
+            self.resolve(RENDER_EXTERNAL_URL="https://myapp.onrender.com"),
+            "https://myapp.onrender.com",
+        )
+
+    def test_missing_scheme_is_added(self):
+        """أشهر خطأ في النسخ: وضع النطاق بلا https:// فيفشل القرع الذاتي."""
+        self.assertEqual(self.resolve(PUBLIC_URL="myapp.onrender.com"), "https://myapp.onrender.com")
+
+    def test_trailing_slash_is_removed(self):
+        self.assertEqual(
+            self.resolve(PUBLIC_URL="https://myapp.onrender.com/"), "https://myapp.onrender.com"
+        )
+
+    def test_empty_when_nothing_is_configured(self):
+        self.assertEqual(self.resolve(), "")
+
+    def test_blank_values_are_ignored(self):
+        self.assertEqual(self.resolve(PUBLIC_URL="   "), "")
 
 
 if __name__ == "__main__":

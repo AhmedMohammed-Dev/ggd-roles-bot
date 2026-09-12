@@ -11,21 +11,23 @@ services:
     buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python -u bot.py
     healthCheckPath: /healthz
-    # autoDeploy مهجور الآن — البديل الرسمي هو autoDeployTrigger
-    autoDeployTrigger: commit
+    # أوقفنا النشر التلقائي عن قصد: المرجع الرسمي ينصح بـ off لخدمات زر «Deploy to Render»
+    # حتى لا تُعيد كل حفظة (push) نشر البوت الشغّال فتقطعه بلا داعٍ.
+    # لتحديث البوت لاحقاً: لوحة Render → خدمتك → Manual Deploy.
+    autoDeployTrigger: off
     envVars:
-      # ⬇️ هذه القيم تُدخل سرّاً في لوحة Render (sync: false = لا تُحفظ في الملف)
+      # ⬇️ الحقل الوحيد المطلوب منك: توكن البوت (يُكتب سرّاً في لوحة Render، ولا يُحفظ في الملف)
       - key: DISCORD_TOKEN
         sync: false
+
+      # ⬇️ الباقي مضبوط مسبقاً — لا تحتاج كتابة أي شيء.
+      # سيرفرك أنت (معرّف السيرفر ليس سرّاً — يظهر في كل روابط ديسكورد).
       - key: GUILD_ID
-        sync: false
-      # قائمة بيضاء: البوت يعمل في هذه السيرفرات فقط ويخرج من غيرها
+        value: "1546676344967012383"
+      # قفل أمني: البوت يعمل في هذا السيرفر فقط ويخرج تلقائياً من أي سيرفر آخر.
       - key: ALLOWED_GUILD_IDS
-        sync: false
-      - key: PUBLIC_URL
-        sync: false
-      - key: HEALTH_TOKEN
-        sync: false
+        value: "1546676344967012383"
+
       - key: PYTHON_VERSION
         value: "3.12.6"
       - key: ENABLE_PREFIX_COMMANDS
@@ -34,3 +36,6 @@ services:
         value: "1"
       - key: SELF_PING_SECONDS
         value: "600"
+
+    # ملاحظة: لا حاجة لـ PUBLIC_URL — البوت يقرأ الرابط من RENDER_EXTERNAL_URL الذي تضبطه
+    # Render تلقائياً، فيكون صحيحاً دائماً حتى لو تغيّر اسم النطاق الفرعي.
