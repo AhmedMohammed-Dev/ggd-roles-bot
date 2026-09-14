@@ -5,6 +5,7 @@
 • واجهة أزرار تفاعلية (discord.ui.View / Button) وصفحات متعددة.
 • كل ضغطة زر تُرسل Embed خاص بالمستخدم فقط (ephemeral = لا يراه غيره).
 • Embed يحتوي: اسم الدور بالعربي والإنجليزي + الشرح + الفئة بلونها + صورة الدور.
+• أزرار تصفية بالفئات (إوز / بط / محايد) + زر دور عشوائي + بانر وشعار اللعبة.
 • إضافة/تعديل الأدوار بسهولة من قاموس ROLES (تحت قسم 2).
 • أمرين للتشغيل:  /roles   (Slash)   و   !roles   (Prefix).
 • خادم Flask صغير (Keep-Alive) ليبقى البوت شغّالاً 24/7 على منصّات الاستضافة المجانية.
@@ -22,6 +23,7 @@ import random
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1113,14 +1115,83 @@ ROLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-PER_PAGE = 8  # عدد أزرار الأدوار في كل صفحة (5 في الصف الأول + 3 في الثاني)
+PER_PAGE = 10  # عدد أزرار الأدوار في كل صفحة (5 في الصف الأول + 5 في الثاني)
 
 # الأدوار الشهيرة التي تظهر أولاً في اللوحة (الصفحة الأولى)
 FEATURED_ROLES: Tuple[str, ...] = ("goose", "duck", "dodo", "sheriff", "pelican", "engineer")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3) بناء الرسائل (Embeds)
+# 3) الهوية البصرية — الصور والروابط التي تظهر في كل الرسائل
+#    كل رابط هنا من ويكي اللعبة الرسمي، ويفحصه check_images.py مع باقي الصور.
 # ══════════════════════════════════════════════════════════════════════════════
+
+WIKI_BASE = "https://goose-goose-duck.fandom.com/wiki/"
+PANEL_COLOR = 0x5865F2  # لون اللوحة الرئيسية (بنفسجي ديسكورد)
+
+BRAND: Dict[str, str] = {
+    "name": "دليل أدوار Goose Goose Duck",
+    # بانر عريض أسفل اللوحة الرئيسية: شعار اللعبة الكامل (1280×720) بدل كتلة نص فقط
+    "banner": (
+        "https://static.wikia.nocookie.net/goose-goose-duck/images/a/af/"
+        "Logot.jpg/revision/latest?cb=20260308184835"
+    ),
+    # أيقونة مربّعة (512×512) تظهر بجانب العنوان وفي التذييل — دائرية الشكل في ديسكورد
+    "logo": (
+        "https://static.wikia.nocookie.net/goose-goose-duck/images/d/dd/"
+        "Goose.png/revision/latest?cb=20260310135439"
+    ),
+}
+
+# أزرار تصفية الفئات: التسمية والترتيب الذي تظهر به تحت اللوحة
+TEAM_FILTERS: Tuple[Tuple[str, str], ...] = (
+    ("goose", "🟢 الإوز"),
+    ("duck", "🔴 البط"),
+    ("neutral", "🟡 المحايدون"),
+)
+
+
+def wiki_link(role: Dict[str, Any]) -> str:
+    """رابط البحث عن الدور على ويكي اللعبة.
+
+    لماذا بحث وليس صفحة مباشرة؟ لأن بعض الأدوار لا صفحة لها على الويكي بعد،
+    والرابط المباشر لها يعطي "الصفحة غير موجودة" — أما البحث فيوصل دائماً للنتيجة
+    الصحيحة إن وُجدت، ولا ينكسر أبداً إن لم توجد.
+    """
+    query = urllib.parse.quote_plus(role["name_en"])
+    return f"{WIKI_BASE}Special:Search?query={query}&scope=internal"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4) بناء الرسائل (Embeds)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def role_line(role_key: str) -> str:
+    """سطر مختصر لدور في قائمة اللوحة: إيموجي الدور + الاسم العربي + الإنجليزي."""
+    role = ROLES[role_key]
+    return f"{role['emoji']} **{role['name_ar']}** — {role['name_en']}"
+
+
+def related_roles(role_key: str, limit: int = 3) -> List[str]:
+    """أدوار مجاورة من نفس الفئة تُقترح في نهاية البطاقة.
+
+    الترتيب ثابت (لا عشوائية): نبدأ من الدور التالي لدورنا في ترتيب اللوحة ونلفّ على القائمة،
+    فالنتيجة نفسها في كل تشغيل — وهذا يمنع تغيّر الشكل عند إعادة تشغيل البوت.
+    """
+    team = ROLES[role_key]["team"]
+    peers = [key for key in ordered_role_keys() if ROLES[key]["team"] == team]
+    if len(peers) <= 1:
+        return []
+
+    start = peers.index(role_key) if role_key in peers else 0
+    picked: List[str] = []
+    step = 1
+    while len(picked) < min(limit, len(peers) - 1):
+        candidate = peers[(start + step) % len(peers)]
+        if candidate != role_key:
+            picked.append(candidate)
+        step += 1
+    return picked
 
 
 def build_role_embed(role_key: str) -> discord.Embed:
@@ -1132,10 +1203,11 @@ def build_role_embed(role_key: str) -> discord.Embed:
     if role.get("mode"):
         mode = MODES.get(role["mode"], MODES["classic"])
         header.append(f"**الوضع:** {mode['label']}")
-    header.append(f"**الدور رقم:** `{role_key}`")
+    header.append(f"**المعرّف:** `{role_key}`")
     if not role.get("image"):
         # شفافية: الدور موجود بالشرح الكامل حتى لو لم يُرفع له رسم رسمي على ويكي اللعبة بعد
         header.append("🖼️ *لا تتوفّر صورة رسمية لهذا الدور على ويكي اللعبة بعد.*")
+    header.append(f"🔗 [اعرف أكثر عن الدور على ويكي اللعبة]({wiki_link(role)})")
 
     embed = discord.Embed(
         title=f"{role['emoji']} {role['name_ar']}  •  {role['name_en']}",
@@ -1143,21 +1215,32 @@ def build_role_embed(role_key: str) -> discord.Embed:
         color=team["color"],
         timestamp=datetime.now(timezone.utc),
     )
+    # سطر علوي يحدد الفئة فوراً قبل قراءة أي كلام
+    embed.set_author(
+        name=f"{team['emoji']} {team['short']} • {role['name_en']}", icon_url=BRAND["logo"]
+    )
     embed.add_field(name="🎯 الهدف", value=role["goal"], inline=False)
     embed.add_field(name="🕹️ طريقة اللعب", value=role["how"], inline=False)
     embed.add_field(name="💡 نصائح", value=role["tips"], inline=False)
     if role.get("maps"):
         embed.add_field(name="🗺️ متاح في", value=role["maps"], inline=False)
 
+    peers = related_roles(role_key)
+    if peers:
+        embed.add_field(
+            name="🧭 أدوار من نفس الفئة",
+            value="\n".join(f"• {role_line(key)}" for key in peers),
+            inline=False,
+        )
+
     if role.get("image"):
         embed.set_image(url=role["image"])
 
-    embed.set_footer(text="Goose Goose Duck • دليل الأدوار بالعربي • رسالة خاصة بك وحدك")
+    embed.set_footer(
+        text="Goose Goose Duck • دليل الأدوار بالعربي • رسالة خاصة بك وحدك",
+        icon_url=BRAND["logo"],
+    )
     return embed
-
-
-def total_pages() -> int:
-    return max(1, (len(ROLES) + PER_PAGE - 1) // PER_PAGE)
 
 
 def ordered_role_keys() -> List[str]:
@@ -1167,36 +1250,71 @@ def ordered_role_keys() -> List[str]:
     return featured + rest
 
 
-def page_roles(page: int) -> List[str]:
+def filtered_role_keys(team: Optional[str] = None) -> List[str]:
+    """أدوار اللوحة: كل الأدوار، أو أدوار فئة واحدة عند استخدام أزرار التصفية."""
     keys = ordered_role_keys()
-    return keys[page * PER_PAGE : (page + 1) * PER_PAGE]
+    if team is None or team not in TEAMS:
+        return keys
+    return [key for key in keys if ROLES[key]["team"] == team]
 
 
-def build_panel_embed(page: int) -> discord.Embed:
-    """اللوحة الرئيسية: دليل مختصر + دلالة الألوان + رقم الصفحة."""
-    role_names = "\n".join(
-        f"{TEAMS[ROLES[k]['team']]['emoji']} **{ROLES[k]['name_ar']}** — {ROLES[k]['name_en']}"
-        for k in page_roles(page)
-    )
+def total_pages(team: Optional[str] = None) -> int:
+    return max(1, (len(filtered_role_keys(team)) + PER_PAGE - 1) // PER_PAGE)
+
+
+def page_roles(page: int, team: Optional[str] = None) -> List[str]:
+    keys = filtered_role_keys(team)
+    start = max(0, page) * PER_PAGE
+    return keys[start : start + PER_PAGE]
+
+
+def build_panel_embed(page: int, team: Optional[str] = None) -> discord.Embed:
+    """اللوحة الرئيسية: شرح الاستخدام + أعداد الفئات + أدوار الصفحة + بانر اللعبة."""
+    team = team if team in TEAMS else None
+    keys = page_roles(page, team)
+    counts = {name: sum(1 for role in ROLES.values() if role["team"] == name) for name in TEAMS}
+
     embed = discord.Embed(
-        title="🦢 دليل أدوار Goose Goose Duck (بالعربي)",
+        title="🦢 دليل أدوار Goose Goose Duck",
         description=(
-            "اضغط على زر الدور لتظهر لك بطاقته الكاملة **لك وحدك** 🤫\n"
-            "(الرسالة تُرسل بشكل خاص: لا يراها أحد غيرك في الروم)\n\n"
-            "**دلالة الألوان:**\n"
-            "🟢 أخضر = إوز (Goose)  •  🔴 أحمر = بط (Duck)  •  🟡 أصفر = محايد (Neutral)\n\n"
-            "**الأوضاع:** 🎮 Classic • 💀 Corruption • 🎃 Trick or Treat • 🍗 TLC • 🦉 Hoot & Seek"
+            "**اضغط على أي دور لتصل بطاقته كاملة — لك وحدك** 🤫\n"
+            "الرسالة تُرسل بشكل خاص فلا يراها أحد غيرك في الروم.\n\n"
+            "**دلالة الألوان:** 🟢 إوز (Goose) • 🔴 بط (Duck) • 🟡 محايد (Neutral)\n\n"
+            "**الأوضاع:** 🎮 Classic • 💀 Corruption • 🎃 Trick or Treat • 🍗 TLC • 🦉 Hoot & Seek\n"
+            "**أزرار التصفية** في الأسفل تعرض فئة واحدة فقط، و«دور عشوائي» يختار لك دوراً فوراً."
         ),
-        color=0x5865F2,
+        color=PANEL_COLOR,
         timestamp=datetime.now(timezone.utc),
     )
-    embed.add_field(name=f"📖 أدوار هذه الصفحة ({len(page_roles(page))})", value=role_names or "—", inline=False)
-    embed.set_footer(text=f"صفحة {page + 1} من {total_pages()} • {len(ROLES)} دوراً متاحاً")
+    embed.set_author(name=f"{BRAND['name']} • {len(ROLES)} دوراً", icon_url=BRAND["logo"])
+
+    # ثلاثة أعداد في صف واحد: نظرة سريعة على حجم كل فئة قبل التنقل
+    for team_key, team_data in TEAMS.items():
+        embed.add_field(name=team_data["label"], value=f"**{counts[team_key]}** دوراً", inline=True)
+
+    # أدوار الصفحة في عمودين متجاورين بدل قائمة طويلة واحدة
+    half = max(1, math.ceil(len(keys) / 2))
+    left, right = keys[:half], keys[half:]
+    embed.add_field(
+        name=f"📖 أدوار هذه الصفحة ({len(keys)})",
+        value="\n".join(role_line(key) for key in left) or "—",
+        inline=True,
+    )
+    if right:
+        # اسم حقل فارغ حتى يبقى العمود الثاني بجانب الأول
+        embed.add_field(name="\u200b", value="\n".join(role_line(key) for key in right), inline=True)
+
+    embed.set_image(url=BRAND["banner"])
+    scope = f"{TEAMS[team]['label']} فقط" if team else "كل الأدوار"
+    embed.set_footer(
+        text=f"صفحة {page + 1} من {total_pages(team)} • {scope} • {len(ROLES)} دوراً",
+        icon_url=BRAND["logo"],
+    )
     return embed
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4) حماية بسيطة من السبام (Cooldown لكل مستخدم)
+# 5) حماية بسيطة من السبام (Cooldown لكل مستخدم)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _cooldowns: Dict[int, float] = {}
@@ -1231,7 +1349,7 @@ def guild_allowed(interaction: discord.Interaction) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5) واجهة الأزرار التفاعلية
+# 6) واجهة الأزرار التفاعلية
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -1273,35 +1391,41 @@ class RoleButton(discord.ui.Button):
 
 
 class RoleBoardView(discord.ui.View):
-    """لوحة الأزرار: أدوار الصفحة الحالية + التنقل بين الصفحات."""
+    """لوحة الأزرار: أدوار الصفحة الحالية + التنقل بين الصفحات + تصفية بالفئات."""
 
-    def __init__(self, page: int = 0):
+    def __init__(self, page: int = 0, team: Optional[str] = None):
         super().__init__(timeout=None)  # لا تنتهي صلاحية الأزرار
-        self.page = max(0, min(page, total_pages() - 1))
+        self.team = team if team in TEAMS else None
+        self.page = max(0, min(page, total_pages(self.team) - 1))
 
-        current = page_roles(self.page)
+        current = page_roles(self.page, self.team)
         for index, role_key in enumerate(current):
             self.add_item(RoleButton(role_key, row=0 if index < 5 else 1))
 
         nav_row = 1 if len(current) <= 5 else 2
+        self._add_navigation(nav_row)
+        self._add_filters(nav_row + 1)
 
+    # ── التنقل بين الصفحات ──
+    def _add_navigation(self, row: int) -> None:
         prev_button = discord.ui.Button(
-            label="⬅️ السابق", style=discord.ButtonStyle.primary, row=nav_row, disabled=self.page == 0
+            label="⬅️ السابق", style=discord.ButtonStyle.secondary, row=row, disabled=self.page == 0
         )
         page_button = discord.ui.Button(
-            label=f"📄 {self.page + 1}/{total_pages()}",
+            label=f"📄 {self.page + 1}/{total_pages(self.team)}",
             style=discord.ButtonStyle.secondary,
-            row=nav_row,
+            row=row,
             disabled=True,
         )
         next_button = discord.ui.Button(
             label="التالي ➡️",
-            style=discord.ButtonStyle.primary,
-            row=nav_row,
-            disabled=self.page >= total_pages() - 1,
+            style=discord.ButtonStyle.secondary,
+            row=row,
+            disabled=self.page >= total_pages(self.team) - 1,
         )
+        # زر العشوائي وحده مميّز باللون الأزرق: هو الأسرع للزوار الجدد
         random_button = discord.ui.Button(
-            label="🎲 دور عشوائي", style=discord.ButtonStyle.primary, row=nav_row
+            label="🎲 دور عشوائي", style=discord.ButtonStyle.primary, row=row
         )
 
         prev_button.callback = self._go_prev
@@ -1313,13 +1437,48 @@ class RoleBoardView(discord.ui.View):
         self.add_item(next_button)
         self.add_item(random_button)
 
+    # ── تصفية الفئات: صف مستقل حتى لا تختلط بالتنقل ──
+    def _add_filters(self, row: int) -> None:
+        for team_key, label in TEAM_FILTERS:
+            button = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary if self.team == team_key else discord.ButtonStyle.secondary,
+                row=row,
+                disabled=self.team == team_key,  # الزر النشط يظهر مضغوطاً فلا تتكرّر الضغطة
+            )
+            button.callback = self._filter_to(team_key)
+            self.add_item(button)
+
+        every_button = discord.ui.Button(
+            label="📖 كل الأدوار",
+            style=discord.ButtonStyle.primary if self.team is None else discord.ButtonStyle.secondary,
+            row=row,
+            disabled=self.team is None,
+        )
+        every_button.callback = self._filter_to(None)
+        self.add_item(every_button)
+
+    def _filter_to(self, team: Optional[str]):
+        """يعيد اللوحة لبدايتها مفلترة على الفئة المختارة (الصفحة تُصفَّر فلا يضيع المستخدم)."""
+
+        async def _callback(interaction: discord.Interaction) -> None:
+            await interaction.response.edit_message(
+                embed=build_panel_embed(0, team), view=RoleBoardView(0, team)
+            )
+
+        return _callback
+
     async def _go_prev(self, interaction: discord.Interaction) -> None:
         target = max(0, self.page - 1)
-        await interaction.response.edit_message(embed=build_panel_embed(target), view=RoleBoardView(target))
+        await interaction.response.edit_message(
+            embed=build_panel_embed(target, self.team), view=RoleBoardView(target, self.team)
+        )
 
     async def _go_next(self, interaction: discord.Interaction) -> None:
-        target = min(total_pages() - 1, self.page + 1)
-        await interaction.response.edit_message(embed=build_panel_embed(target), view=RoleBoardView(target))
+        target = min(total_pages(self.team) - 1, self.page + 1)
+        await interaction.response.edit_message(
+            embed=build_panel_embed(target, self.team), view=RoleBoardView(target, self.team)
+        )
 
     async def _random(self, interaction: discord.Interaction) -> None:
         if not guild_allowed(interaction):
@@ -1331,7 +1490,8 @@ class RoleBoardView(discord.ui.View):
                 f"⏳ انتظر {remaining:.1f} ثانية.", ephemeral=True, delete_after=3
             )
             return
-        picked = random.choice(list(ROLES.keys()))
+        # العشوائي يحترم التصفية الحالية: تصفية الإوز لا تعطيك بطة
+        picked = random.choice(filtered_role_keys(self.team))
         await interaction.response.send_message(embed=build_role_embed(picked), ephemeral=True)
 
     async def on_error(
@@ -1349,7 +1509,7 @@ class RoleBoardView(discord.ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6) العميل (Bot)
+# 7) العميل (Bot)
 # ══════════════════════════════════════════════════════════════════════════════
 
 intents = discord.Intents.none()
@@ -1490,7 +1650,7 @@ async def on_app_command_error(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7) خادم Flask للإبقاء على الحياة (Keep-Alive 24/7)
+# 8) خادم Flask للإبقاء على الحياة (Keep-Alive 24/7)
 #    ملاحظة أمنية: وضع التصحيح (Debug) مُعطّل، ولا توجد أي نقطة نهاية تنفيذية — الفحص فقط.
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1588,7 +1748,7 @@ def start_self_ping() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8) التشغيل
+# 9) التشغيل
 # ══════════════════════════════════════════════════════════════════════════════
 
 

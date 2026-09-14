@@ -19,3 +19,7 @@ env/
 .idea/
 .vscode/
 .DS_Store
+
+# ملفات معاينة/تجارب مؤقّتة (لا تخصّ البوت نفسه)
+_tmp_*.py
+_board_preview.html

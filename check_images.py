@@ -61,15 +61,34 @@ def check_one(item: Tuple[str, str]) -> Tuple[str, str, str]:
         return key, f"{type(error).__name__}: {error}"[:120], url
 
 
-def main(argv: List[str]) -> int:
-    show_all = "--all" in argv
+def collect_urls() -> Dict[str, str]:
+    """كل الروابط التي يجب أن تعمل: صور الأدوار + صور هوية البوت (بانر وشعار).
+
+    لماذا الهوية أيضاً؟ لأن البانر يظهر في اللوحة الرئيسية في كل مرة يكتب فيها أحدهم
+    ‎/roles، وقالب مكسور هناك أسوأ من صورة دور واحدة ناقصة.
+    """
     urls: Dict[str, str] = {
         key: role["image"] for key, role in bot.ROLES.items() if role.get("image")
     }
+    urls.update(
+        {
+            f"هوية البوت: {name}": value
+            for name, value in bot.BRAND.items()
+            if isinstance(value, str) and value.startswith("https://")
+        }
+    )
+    return urls
+
+
+def main(argv: List[str]) -> int:
+    show_all = "--all" in argv
+    role_count = sum(1 for role in bot.ROLES.values() if role.get("image"))
     without_image = [key for key, role in bot.ROLES.items() if not role.get("image")]
+    urls = collect_urls()
 
     print(f"إجمالي الأدوار: {len(bot.ROLES)}")
-    print(f"أدوار لها صورة: {len(urls)}  |  أدوار بلا صورة رسمية: {len(without_image)}")
+    print(f"أدوار لها صورة: {role_count}  |  أدوار بلا صورة رسمية: {len(without_image)}")
+    print(f"روابط هوية البوت (بانر/شعار): {len(urls) - role_count}")
     print("جارٍ فحص الروابط على الإنترنت...\n")
 
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -82,7 +101,7 @@ def main(argv: List[str]) -> int:
 
     print("\n" + "─" * 52)
     if broken:
-        print(f"❌ توجد {len(broken)} صورة مكسورة — صحّح روابطها في قاموس ROLES داخل bot.py:")
+        print(f"❌ توجد {len(broken)} صورة مكسورة — صحّح روابطها داخل bot.py")
         for key, reason in broken:
             print(f"   • {key}: {reason}")
         return 1

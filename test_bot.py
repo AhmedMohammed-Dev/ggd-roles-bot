@@ -227,6 +227,119 @@ class TestBoardLayout(unittest.TestCase):
             self.assertLessEqual(len(button.label), 80, key)
 
 
+class TestTeamFilters(unittest.TestCase):
+    """أزرار تصفية الفئات: تعرض فئة واحدة فقط بكل أدوارها وبعدد صفحات أقل."""
+
+    @staticmethod
+    def _filter_buttons(view):
+        labels = {label for _, label in bot.TEAM_FILTERS} | {"📖 كل الأدوار"}
+        return [item for item in view.children if item.label in labels]
+
+    def test_filtered_pages_hold_exactly_that_team(self):
+        for team in bot.TEAMS:
+            reached = []
+            for page in range(bot.total_pages(team)):
+                reached.extend(bot.page_roles(page, team))
+            expected = [key for key, role in bot.ROLES.items() if role["team"] == team]
+            self.assertEqual(sorted(reached), sorted(expected), f"فئة {team}")
+            self.assertTrue(all(bot.ROLES[key]["team"] == team for key in reached))
+
+    def test_filtering_needs_fewer_pages_than_the_whole_roster(self):
+        for team in bot.TEAMS:
+            self.assertLess(bot.total_pages(team), bot.total_pages(), f"فئة {team}")
+
+    def test_exactly_one_filter_button_is_active(self):
+        unfiltered = self._filter_buttons(bot.RoleBoardView(0))
+        self.assertEqual([item.label for item in unfiltered if item.disabled], ["📖 كل الأدوار"])
+        for team, label in bot.TEAM_FILTERS:
+            view = bot.RoleBoardView(0, team)
+            self.assertEqual([item.label for item in self._filter_buttons(view) if item.disabled], [label])
+
+    def test_unknown_filter_falls_back_to_the_full_roster(self):
+        view = bot.RoleBoardView(0, "not-a-real-team")
+        self.assertIsNone(view.team)
+        self.assertEqual(view.page, 0)
+
+    def test_filtered_views_respect_component_limits(self):
+        for team in bot.TEAMS:
+            for page in range(bot.total_pages(team)):
+                view = bot.RoleBoardView(page, team)
+                self.assertLessEqual(len(view.children), 25, f"{team} صفحة {page}")
+                rows = [item.row for item in view.children]
+                self.assertLessEqual(max(rows), 4, f"{team} صفحة {page}")
+                self.assertEqual(sorted(set(rows)), list(range(max(rows) + 1)), f"{team} صفحة {page}")
+
+    def test_page_indicator_reflects_the_filter(self):
+        filtered = bot.RoleBoardView(0, "goose")
+        labels = [item.label for item in filtered.children]
+        self.assertIn(f"📄 1/{bot.total_pages('goose')}", labels)
+        self.assertIn(bot.TEAMS["goose"]["label"], bot.build_panel_embed(0, "goose").footer.text)
+
+    def test_every_page_is_full_except_the_last(self):
+        for team in (None, *bot.TEAMS):
+            for page in range(bot.total_pages(team) - 1):
+                self.assertEqual(len(bot.page_roles(page, team)), bot.PER_PAGE, f"{team} صفحة {page}")
+
+
+class TestBoardLook(unittest.TestCase):
+    """الشكل العام: البانر والشعار واللون وأدوار نفس الفئة داخل بطاقة الدور."""
+
+    def test_panel_shows_the_game_banner_and_logo(self):
+        panel = bot.build_panel_embed(0)
+        self.assertEqual(panel.image.url, bot.BRAND["banner"])
+        self.assertEqual(panel.author.icon_url, bot.BRAND["logo"])
+        self.assertEqual(panel.footer.icon_url, bot.BRAND["logo"])
+        self.assertTrue(bot.BRAND["banner"].startswith("https://"))
+        self.assertTrue(bot.BRAND["logo"].startswith("https://"))
+
+    def test_panel_counts_match_the_roster(self):
+        panel = bot.build_panel_embed(0)
+        self.assertIn(str(len(bot.ROLES)), panel.author.name)
+        for team_key, team in bot.TEAMS.items():
+            count = sum(1 for role in bot.ROLES.values() if role["team"] == team_key)
+            field = next(f for f in panel.fields if f.name == team["label"])
+            self.assertIn(str(count), field.value)
+
+    def test_panel_lists_this_page_roles_in_two_columns(self):
+        panel = bot.build_panel_embed(0)
+        listing = [f for f in panel.fields if "أدوار هذه الصفحة" in f.name]
+        self.assertEqual(len(listing), 1)
+        continuation = [f for f in panel.fields if f.name == "\u200b"]
+        self.assertEqual(len(continuation), 1)
+        mentioned = "\n".join([listing[0].value, continuation[0].value])
+        for key in bot.page_roles(0):
+            self.assertIn(bot.ROLES[key]["name_ar"], mentioned, key)
+
+    def test_every_panel_fits_discord_limits(self):
+        for team in (None, *bot.TEAMS):
+            for page in range(bot.total_pages(team)):
+                panel = bot.build_panel_embed(page, team)
+                self.assertLessEqual(len(panel), 6000, f"{team} صفحة {page}")
+                for field in panel.fields:
+                    self.assertLessEqual(len(field.name), 256)
+                    self.assertLessEqual(len(field.value), 1024)
+
+    def test_role_card_links_to_the_wiki_search(self):
+        embed = bot.build_role_embed("sheriff")
+        self.assertIn(bot.wiki_link(bot.ROLES["sheriff"]), embed.description)
+        self.assertIn("goose-goose-duck.fandom.com", bot.wiki_link(bot.ROLES["sheriff"]))
+
+    def test_role_card_offers_related_roles_from_the_same_team(self):
+        for key in bot.ROLES:
+            peers = bot.related_roles(key)
+            self.assertTrue(peers, f"الدور {key} بلا أدوار مقترحة")
+            self.assertLessEqual(len(peers), 3)
+            self.assertNotIn(key, peers)
+            for peer in peers:
+                self.assertEqual(bot.ROLES[peer]["team"], bot.ROLES[key]["team"], peer)
+            self.assertIn("🧭 أدوار من نفس الفئة", [f.name for f in bot.build_role_embed(key).fields], key)
+
+    def test_related_roles_are_stable_between_calls(self):
+        """لا عشوائية: نفس الدور يعطي نفس الاقتراحات في كل مرة."""
+        for key in ("sheriff", "assassin", "dodo"):
+            self.assertEqual(bot.related_roles(key), bot.related_roles(key))
+
+
 class TestKeepAlive(unittest.TestCase):
     def _get(self, path):
         """طلب GET مع مفتاح الفحص إن كان مفعّلاً في هذه البيئة."""
