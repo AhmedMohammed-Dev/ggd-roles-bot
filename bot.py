@@ -1312,9 +1312,13 @@ def normalize_search_text(text: str) -> str:
 
 
 def role_choice_label(role_key: str) -> str:
-    """نص الخيار في الاقتراحات التلقائية: إيموجي + عربي + إنجليزي."""
+    """نص الخيار في الاقتراحات التلقائية: إيموجي + اسم الدور بالإنجليزية.
+
+    البحث نفسه يظل يفهم العربي والإنجليزي (search_roles يطابق name_ar أيضاً)،
+    لكن الاسم الظاهر إنجليزي — كما طلب صاحب السيرفر حتى يتطابق مع أسماء اللعبة.
+    """
     role = ROLES[role_key]
-    return f"{role['emoji']} {role['name_ar']} — {role['name_en']}"
+    return f"{role['emoji']} {role['name_en']}"
 
 
 def search_roles(query: str, limit: int = 25) -> List[Tuple[str, str]]:
@@ -1361,9 +1365,9 @@ def find_role(query: str) -> Optional[str]:
 
 
 def role_line(role_key: str, guild_id: Optional[int] = None) -> str:
-    """سطر مختصر لدور في قائمة اللوحة: إيموجي الدور + الاسم العربي + الإنجليزي."""
+    """سطر مختصر لدور في قائمة اللوحة: إيموجي الدور + اسمه بالإنجليزية."""
     role = ROLES[role_key]
-    return f"{icon_markup(role_key, guild_id)} **{role['name_ar']}** — {role['name_en']}"
+    return f"{icon_markup(role_key, guild_id)} **{role['name_en']}**"
 
 
 def related_roles(role_key: str, limit: int = 3) -> List[str]:
@@ -1389,7 +1393,7 @@ def related_roles(role_key: str, limit: int = 3) -> List[str]:
 
 
 def build_role_embed(role_key: str, guild_id: Optional[int] = None) -> discord.Embed:
-    """يبني بطاقة الدور: الاسم عربي/إنجليزي + الشرح + لون الفئة + صورة الدور.
+    """يبني بطاقة الدور: اسم إنجليزي + شرح عربي + لون الفئة + صورة الدور.
 
     guild_id اختياري: إن كانت إيموجيات السيرفر المخصصة مرفوعة نستخدم صورة الدور
     كأيقونة في العنوان وفي سطر الفئة، وإلا نرجع لإيموجي ديسكورد العام.
@@ -1409,7 +1413,7 @@ def build_role_embed(role_key: str, guild_id: Optional[int] = None) -> discord.E
     header.append(f"🔗 [اعرف أكثر عن الدور على ويكي اللعبة]({wiki_link(role)})")
 
     embed = discord.Embed(
-        title=f"{icon_markup(role_key, guild_id)} {role['name_ar']}  •  {role['name_en']}",
+        title=f"{icon_markup(role_key, guild_id)} {role['name_en']}",
         description="\n".join(header),
         color=team["color"],
         timestamp=datetime.now(timezone.utc),
@@ -1669,7 +1673,7 @@ class RoleButton(discord.ui.Button):
             "neutral": discord.ButtonStyle.secondary,  # رمادي (لا يوجد أصفر في ديسكورد)
         }
         super().__init__(
-            label=role["name_ar"],
+            label=role["name_en"],  # أسماء الأدوار بالإنجليزية كما تظهر في اللعبة
             # إيموجي السيرفر المخصص (صورة الدور) إن كانت مرفوعة وصالحة، وإلا الإيموجي العام
             emoji=button_emoji(role_key, guild_id),
             style=styles.get(role["team"], discord.ButtonStyle.secondary),

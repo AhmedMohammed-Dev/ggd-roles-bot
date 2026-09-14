@@ -58,8 +58,9 @@ class TestEmbeds(unittest.TestCase):
     def test_role_embed_has_name_color_and_image(self):
         embed = bot.build_role_embed("sheriff")
         role = bot.ROLES["sheriff"]
-        self.assertIn(role["name_ar"], embed.title)
+        # أسماء الأدوار تُعرض بالإنجليزية كما في اللعبة (الشرح فقط بالعربي)
         self.assertIn(role["name_en"], embed.title)
+        self.assertNotIn(role["name_ar"], embed.title)
         self.assertEqual(embed.color.value, bot.TEAMS["goose"]["color"])
         self.assertIsNotNone(embed.image.url)
 
@@ -310,7 +311,8 @@ class TestBoardLook(unittest.TestCase):
         self.assertEqual(len(continuation), 1)
         mentioned = "\n".join([listing[0].value, continuation[0].value])
         for key in bot.page_roles(0):
-            self.assertIn(bot.ROLES[key]["name_ar"], mentioned, key)
+            self.assertIn(bot.ROLES[key]["name_en"], mentioned, key)
+            self.assertNotIn(bot.ROLES[key]["name_ar"], mentioned, key)
 
     def test_every_panel_fits_discord_limits(self):
         for team in (None, *bot.TEAMS):
@@ -371,7 +373,7 @@ class TestCustomEmojis(unittest.TestCase):
             self.assertEqual(bot.icon_markup("sheriff", 123), "<:ggd_sheriff:999>")
 
             button = bot.RoleButton("sheriff", row=0, guild_id=123)
-            self.assertEqual(button.label, bot.ROLES["sheriff"]["name_ar"])
+            self.assertEqual(button.label, bot.ROLES["sheriff"]["name_en"])
             self.assertEqual(button.emoji.id, 999)
 
             card = bot.build_role_embed("sheriff", 123)
@@ -513,7 +515,8 @@ class TestRoleSearch(unittest.TestCase):
             self.assertLessEqual(len(hits), 25, query)
             for key, label in hits:
                 self.assertIn(key, bot.ROLES)
-                self.assertIn(bot.ROLES[key]["name_ar"], label)
+                self.assertIn(bot.ROLES[key]["name_en"], label)
+                self.assertNotIn(bot.ROLES[key]["name_ar"], label)
                 self.assertLessEqual(len(label), 100)
                 self.assertNotEqual(label.strip(), "")
 
