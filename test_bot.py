@@ -77,11 +77,101 @@ class TestEmbeds(unittest.TestCase):
             self.assertLessEqual(len(embed), 6000, key)
 
     def test_role_without_image_is_handled(self):
-        """الأدوار بلا صورة يجب أن تُبنى بدون أخطاء وبدون صورة."""
-        key = bot.ROLES["duck"]["image"]
-        self.assertIsNone(key, "افتراض الاختبار: البطة بلا صورة — حدّث الاختبار إن أضفت صورة")
-        embed = bot.build_role_embed("duck")
+        """الأدوار بلا صورة يجب أن تُبنى بدون أخطاء وبدون صورة (لا رابط مكسور)."""
+        key = "goose"
+        patched = {name: dict(role) for name, role in bot.ROLES.items()}
+        patched[key]["image"] = None
+        with mock.patch.dict(bot.ROLES, patched, clear=True):
+            embed = bot.build_role_embed(key)
         self.assertIsNone(embed.image.url)
+
+    def test_roles_without_image_say_so_in_the_card(self):
+        """إن لم توجد صورة رسمية للدور، تُذكر الحقيقة بوضوح في البطاقة بدل صمت مربك."""
+        missing = [key for key, role in bot.ROLES.items() if not role.get("image")]
+        self.assertTrue(missing, "افتراض الاختبار: توجد أدوار بلا صورة رسمية على الويكي")
+        self.assertIn("لا تتوفّر صورة", bot.build_role_embed(missing[0]).description)
+
+    def test_maps_field_is_shown_when_present(self):
+        """الأدوار المقصورة على خرائط معيّنة تُظهر ذلك في البطاقة."""
+        restricted = [key for key, role in bot.ROLES.items() if role.get("maps")]
+        self.assertTrue(restricted, "افتراض الاختبار: توجد أدوار مقصورة على خرائط")
+        embed = bot.build_role_embed(restricted[0])
+        self.assertIn("🗺️ متاح في", [field.name for field in embed.fields])
+
+
+class TestRosterCompleteness(unittest.TestCase):
+    """القائمة الكاملة لأدوار اللعبة — تفشل لو حُذف دور سهواً أو بقي دور ناقصاً.
+
+    المصدر: القائمة الرسمية لأدوار Goose Goose Duck (الوضع الكلاسيكي + الأوضاع الخاصة).
+    أضف المفتاح الجديد هنا مع أي دور تضيفه حتى يبقى الدليل كاملاً.
+    """
+
+    EXPECTED = (
+        # إوز (30)
+        "goose", "sheriff", "engineer", "vigilante", "detective", "canadian", "avenger",
+        "astral", "stalker", "soldier", "scientist", "survivalist", "fortune_teller",
+        "mortician", "birdwatcher", "medium", "gravy", "lover_goose", "mimic", "bodyguard",
+        "politician", "locksmith", "celebrity", "adventurer", "street_urchin", "tracker",
+        "lobbyist", "coroner", "sensor", "lucid_dreamer",
+        # بط (30)
+        "duck", "professional", "assassin", "morphling", "spy", "cannibal", "demolitionist",
+        "identity_thief", "silencer", "party", "hitman", "snitch", "ninja", "undertaker",
+        "invisibility", "serial_killer", "warlock", "esper", "preacher", "cupid", "drone",
+        "mime", "clown", "looter", "sniper", "witch_doctor", "lost_duckling", "carrier",
+        "parasite", "swordsman",
+        # محايدون (10)
+        "dodo", "pelican", "pigeon", "vulture", "falcon", "raven", "dueling_dodos", "hawk",
+        "cuckoo", "magpie",
+        # أدوار الأوضاع الخاصة (16)
+        "inquisitor", "saint", "demon_hunter", "seamstress", "high_priest", "initiate",
+        "sin_eater", "crow", "villager", "vampire", "thrall", "mummy", "camo_duck",
+        "chicken", "spotter", "owl",
+    )
+
+    def test_no_role_is_missing(self):
+        self.assertEqual(sorted(bot.ROLES), sorted(self.EXPECTED))
+
+    def test_all_three_teams_are_represented(self):
+        counts: dict = {}
+        for role in bot.ROLES.values():
+            counts[role["team"]] = counts.get(role["team"], 0) + 1
+        self.assertEqual(sorted(counts), sorted(bot.TEAMS))
+        for team, count in counts.items():
+            self.assertGreater(count, 3, f"فريق {team} فيه {count} دوراً فقط")
+
+    def test_modes_are_declared_and_known(self):
+        """أي دور بوضع خاص يجب أن يكون وضعه معرفاً، والوضع الافتراضي لا يُكتب صراحة."""
+        for key, role in bot.ROLES.items():
+            mode = role.get("mode")
+            if mode is None:
+                continue
+            self.assertIn(mode, bot.MODES, f"وضع غير معروف في الدور {key}")
+            self.assertNotEqual(mode, "classic", f"الدور {key}: الوضع الكلاسيكي هو الافتراضي")
+
+    def test_special_roles_show_their_mode_in_the_card(self):
+        for key, role in bot.ROLES.items():
+            if not role.get("mode"):
+                continue
+            self.assertIn(bot.MODES[role["mode"]]["label"], bot.build_role_embed(key).description, key)
+
+    def test_english_names_are_unique(self):
+        names = [role["name_en"] for role in bot.ROLES.values()]
+        self.assertEqual(len(names), len(set(names)), "يوجد دوران بنفس الاسم الإنجليزي")
+
+    def test_maps_field_is_arabic_when_present(self):
+        arabic = re.compile(r"[\u0600-\u06FF]")
+        for key, role in bot.ROLES.items():
+            maps = role.get("maps")
+            if maps is None:
+                continue
+            self.assertTrue(arabic.search(maps), f"حقل الخرائط في {key} بلا نص عربي")
+
+    def test_roster_is_reachable_through_the_board(self):
+        """كل دور في القائمة يمكن الوصول إليه بالتنقل بين الصفحات."""
+        reachable = []
+        for page in range(bot.total_pages()):
+            reachable.extend(bot.page_roles(page))
+        self.assertEqual(sorted(reachable), sorted(self.EXPECTED))
 
 
 class TestBoardLayout(unittest.TestCase):
@@ -154,6 +244,8 @@ class TestKeepAlive(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
+        # عدد الأدوار يظهر في الفحص، فنستطيع التأكد من النسخة المنشورة على السيرفر مباشرةً
+        self.assertEqual(payload["roles"], len(bot.ROLES))
         # لا يجب أن تكشف نقطة الفحص أي معلومة حسّاسة
         self.assertNotIn("token", response.get_data(as_text=True).lower())
 

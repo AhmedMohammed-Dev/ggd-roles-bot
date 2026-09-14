@@ -11,12 +11,11 @@ services:
     buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python -u bot.py
     healthCheckPath: /healthz
-    # أوقفنا النشر التلقائي عن قصد: المرجع الرسمي ينصح بـ off لخدمات زر «Deploy to Render»
-    # حتى لا تُعيد كل حفظة (push) نشر البوت الشغّال فتقطعه بلا داعٍ.
-    # لتحديث البوت لاحقاً: لوحة Render → خدمتك → Manual Deploy.
-    # ⚠️ علامتا التنصيص مهمتان: YAML يفهم off بلا تنصيص على أنها قيمة منطقية false
-    #    فيرفضها Render لأن القيم المسموحة هي: commit / off / checksPass
-    autoDeployTrigger: "off"
+    # النشر التلقائي عند كل حفظة (push) على الفرع main — حتى تصل أي إضافة في الأدوار
+    # إلى البوت الحي بلا أي خطوات يدوية. القيم المسموحة من Render: commit / off / checksPass
+    # ⚠️ علامتا التنصيص مهمتان: YAML يفهم commit بلا تنصيص ككلمة عادية لكن بقية القيم
+    #    (مثل off) تُقرأ كقيمة منطقية، لذا نكتبها دائماً كنصّ صريح لتفادي أي التباس.
+    autoDeployTrigger: "commit"
     envVars:
       # ⬇️ الحقل الوحيد المطلوب منك: توكن البوت (يُكتب سرّاً في لوحة Render، ولا يُحفظ في الملف)
       - key: DISCORD_TOKEN

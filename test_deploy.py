@@ -433,8 +433,10 @@ class TestRenderBlueprint(unittest.TestCase):
         self.assertTrue(env.get("ALLOWED_GUILD_IDS", "").isdigit(), "القفل الأمني مطلوب")
         self.assertEqual(env["GUILD_ID"], env["ALLOWED_GUILD_IDS"])
 
-    def test_auto_deploy_is_off_so_a_push_never_breaks_a_running_bot(self):
-        self.assertEqual(self.spec["services"][0]["autoDeployTrigger"], "off")
+    def test_auto_deploy_follows_every_push(self):
+        """البوت المنشور يستقبل التحديثات تلقائياً (commit) فلا يحتاج المستخدم لخطوات يدوية
+        في كل مرة نضيف فيها أدواراً — وهذا كان سبب تحويل القيمة من off إلى commit."""
+        self.assertEqual(self.spec["services"][0]["autoDeployTrigger"], "commit")
 
     def test_file_itself_contains_no_secret(self):
         for description, pattern in deploy.SECRET_PATTERNS:
