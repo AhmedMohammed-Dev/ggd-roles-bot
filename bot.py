@@ -1518,6 +1518,12 @@ def _health_ok() -> bool:
     return hmac.compare_digest(provided.encode(), HEALTH_TOKEN.encode())
 
 
+# حالة تشخيصية: تُملأ إن تعذّر تشغيل البوت (توكن ناقص أو غير صحيح مثلاً).
+# الفائدة الكبيرة: يبقى الرابط حياً ويقول لك السبب مكتوباً بالعربي،
+# بدل أن تظهر لك صفحة معلّقة أو خطأ غامض لا تدري من أين جاء.
+BOT_PROBLEM: str = ""
+
+
 @flask_app.route("/", methods=["GET", "HEAD"])
 @flask_app.route(KEEPALIVE_PATH, methods=["GET", "HEAD"])
 def health():
@@ -1528,8 +1534,9 @@ def health():
     # ملاحظة: client.latency تكون NaN قبل الاتصال بديسكورد، لذا نتحقق منها بأمان
     latency = client.latency
     payload = {
-        "status": "ok",
+        "status": "error" if BOT_PROBLEM else "ok",
         "service": "ggd-roles-bot",
+        "bot": "offline" if BOT_PROBLEM else "online",
         "uptime_seconds": int(time.time() - _STARTED_AT),
         "guilds": len(client.guilds),
         # عدد الأدوار في هذه النسخة — مجرد رقم غير حسّاس، لكنه يسمح بالتأكد من النسخة
@@ -1537,6 +1544,10 @@ def health():
         "roles": len(ROLES),
         "latency_ms": round(latency * 1000) if latency and math.isfinite(latency) else None,
     }
+    if BOT_PROBLEM:
+        # نُبقي الرمز 200 عن قصد: لو أعدنا 503 لقطع Render الخدمة ولن تستطيع
+        # قراءة سبب المشكلة في المتصفح — وهذا بالضبط ما نريد تجنّبه.
+        payload["reason"] = BOT_PROBLEM
     return jsonify(payload), 200
 
 
@@ -1597,23 +1608,55 @@ def looks_like_discord_token(token: str) -> bool:
     return True
 
 
-def main() -> None:
+def running_on_hosting_platform() -> bool:
+    """هل نعمل على منصّة استضافة (Render/Koyeb/Fly... وليس جهازك)؟
+
+    الفرق مهم عند الفشل: على المنصّة يجب أن يبقى الرابط حياً ليعرض لك السبب،
+    أما على جهازك فنفضّل التوقّف فوراً برسالة واضحة في الطرفية.
+    """
+    markers = (
+        "RENDER_EXTERNAL_URL",  # Render (ودائماً موجود لخدمات الويب)
+        "RENDER",
+        "KOYEB_APP_NAME",
+        "KOYEB_SERVICE_NAME",
+        "FLY_APP_NAME",
+        "DYNO",  # Heroku
+        "RAILWAY_ENVIRONMENT",
+    )
+    return any(os.getenv(name) for name in markers)
+
+
+def token_problem() -> str:
+    """يُرجع سبب المشكلة إن كان التوكن ناقصاً أو غير صحيح، وإلا نصاً فارغاً."""
     if not TOKEN:
+        return "التوكن غير موجود — DISCORD_TOKEN فارغ أو غير مضبوط في إعدادات الاستضافة"
+    if not looks_like_discord_token(TOKEN):
+        return "قيمة DISCORD_TOKEN لا تبدو توكن بوت صحيح (ثلاثة أجزاء تفصلها نقطتان)"
+    return ""
+
+
+def main() -> None:
+    global BOT_PROBLEM
+
+    # ١) خادم الفحص يعمل أولاً وقبل أي شيء آخر: بهذا يبقى الرابط حياً حتى لو كان
+    #    التوكن ناقصاً، فيستطيع أن يخبرك بالسبب بدل أن تظهر صفحة معلّقة بلا تفسير.
+    threading.Thread(target=start_keepalive_server, daemon=True, name="keepalive").start()
+
+    BOT_PROBLEM = token_problem()
+    if BOT_PROBLEM:
+        log.error("❌ %s", BOT_PROBLEM)
+        if running_on_hosting_platform():
+            log.error("⚠️ لن يتصل البوت بديسكورد. افتح رابط الخدمة في المتصفح لترى السبب مكتوباً فيها.")
+            # نُبقي العملية حيّة ليبقى الرابط قادراً على عرض سبب المشكلة
+            while True:
+                time.sleep(3600)
         raise SystemExit(
-            "❌ لم أجد التوكن في متغيّر البيئة DISCORD_TOKEN.\n"
+            f"❌ {BOT_PROBLEM}\n"
             "   افتح ملف .env الموجود بجانب bot.py، وضع التوكن أمام السطر DISCORD_TOKEN= ثم شغّلني من جديد.\n"
             "   (لا تكتب التوكن داخل الكود أبداً.)"
         )
-    if not looks_like_discord_token(TOKEN):
-        raise SystemExit(
-            "❌ قيمة DISCORD_TOKEN لا تبدو توكن بوت صحيح.\n"
-            "   التوكن نصّ طويل يحوي نقطتين — لا بدلاً مؤقتاً مثل «ضع_التوكن_هنا».\n"
-            "   انسخه من Discord Developer Portal → Bot → Reset Token (زر Copy)."
-        )
 
-    threading.Thread(target=start_keepalive_server, daemon=True, name="keepalive").start()
     start_self_ping()
-
     log.info("🚀 تشغيل البوت...")
     # log_handler=None: نستخدم إعدادات التسجيل الخاصة بنا (وتمنع طباعة التوكن في السجلات)
     client.run(TOKEN, log_handler=None)

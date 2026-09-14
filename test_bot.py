@@ -394,5 +394,44 @@ class TestPublicUrlResolution(unittest.TestCase):
         self.assertEqual(self.resolve(PUBLIC_URL="   "), "")
 
 
+class TestFailVisible(unittest.TestCase):
+    """عند فشل التوكن يجب أن يعرف المستخدم السبب من الرابط — لا خدمة معلّقة بلا تفسير."""
+
+    def _get(self):
+        headers = {"X-Health-Key": bot.HEALTH_TOKEN} if bot.HEALTH_TOKEN else {}
+        return bot.flask_app.test_client().get(bot.KEEPALIVE_PATH, headers=headers)
+
+    def test_missing_token_explains_itself(self):
+        with mock.patch.object(bot, "TOKEN", ""):
+            self.assertIn("DISCORD_TOKEN", bot.token_problem())
+
+    def test_malformed_token_explains_itself(self):
+        with mock.patch.object(bot, "TOKEN", "ضع_التوكن_هنا"):
+            self.assertIn("لا تبدو توكن", bot.token_problem())
+
+    def test_healthy_token_reports_no_problem(self):
+        fake = "M" + "a" * 23 + "." + "b" * 6 + "." + "c" * 27
+        with mock.patch.object(bot, "TOKEN", fake):
+            self.assertEqual(bot.token_problem(), "")
+
+    def test_health_shows_the_reason_when_the_bot_cannot_run(self):
+        with mock.patch.object(bot, "BOT_PROBLEM", "التوكن غير موجود — DISCORD_TOKEN فارغ"):
+            response = self._get()
+            payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["bot"], "offline")
+        self.assertIn("التوكن غير موجود", payload["reason"])
+        # نُبقي الرمز 200 حتى يتاح لصاحب البوت قراءة السبب في المتصفح
+        self.assertEqual(response.status_code, 200)
+
+    def test_hosting_platform_is_detected_but_a_local_machine_is_not(self):
+        with mock.patch.dict(os.environ, {"RENDER_EXTERNAL_URL": "https://x.onrender.com"}, clear=True):
+            self.assertTrue(bot.running_on_hosting_platform())
+        with mock.patch.dict(os.environ, {"KOYEB_APP_NAME": "ggd"}, clear=True):
+            self.assertTrue(bot.running_on_hosting_platform())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(bot.running_on_hosting_platform())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
