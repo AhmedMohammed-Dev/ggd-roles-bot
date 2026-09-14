@@ -4,6 +4,7 @@
 التشغيل:  python -m unittest -v test_bot.py
 """
 
+import asyncio
 import os
 import re
 import tempfile
@@ -338,6 +339,80 @@ class TestBoardLook(unittest.TestCase):
         """لا عشوائية: نفس الدور يعطي نفس الاقتراحات في كل مرة."""
         for key in ("sheriff", "assassin", "dodo"):
             self.assertEqual(bot.related_roles(key), bot.related_roles(key))
+
+
+class FakeResponse:
+    """رد تفاعل مزيّف: يسجّل هل أرسلنا رسالة جديدة أم عدّلنا الموجودة."""
+
+    def __init__(self) -> None:
+        self.sent = None
+        self.edited = None
+
+    async def send_message(self, content=None, **kwargs) -> None:
+        self.sent = dict(kwargs, content=content)
+
+    async def edit_message(self, **kwargs) -> None:
+        self.edited = kwargs
+
+
+class FakeInteraction:
+    """تفاعل مزيّف يكفي لاختبار منطق اللوحات بلا اتصال بديسكورد."""
+
+    def __init__(self, ephemeral: bool) -> None:
+        self.response = FakeResponse()
+        self.message = mock.Mock()
+        self.message.flags.ephemeral = ephemeral
+        self.user = mock.Mock(id=1)
+        # السيرفر المسموح من الإعدادات (أو أي معرّف إن لم تُفعَّل القائمة البيضاء)
+        self.guild = mock.Mock(id=next(iter(bot.ALLOWED_GUILD_IDS), 2))
+
+
+class TestPrivateNavigation(unittest.TestCase):
+    """اللوحة العامة يجب ألا تتغير بضغطات الآخرين — كل تنقل يفتح نسخة خاصة بالضاغط.
+
+    هذه هي المشكلة التي حدثت فعلاً: اثنان يضغطان «التالي» في نفس اللحظة فيتبدّل شكل
+    اللوحة على الروم كله. الاختبارات هنا تمنع رجوعها.
+    """
+
+    def _press(self, view, method: str, interaction) -> None:
+        asyncio.run(getattr(view, method)(interaction))
+
+    def _filter_button(self, view, label: str):
+        return next(item for item in view.children if item.label == label)
+
+    def test_navigation_on_the_public_board_opens_a_private_copy(self):
+        interaction = FakeInteraction(ephemeral=False)
+        self._press(bot.RoleBoardView(0), "_go_next", interaction)
+        self.assertIsNotNone(interaction.response.sent, "يجب إرسال نسخة جديدة خاصة بالضاغط")
+        self.assertTrue(interaction.response.sent["ephemeral"])
+        self.assertIsNone(interaction.response.edited, "اللوحة العامة يجب ألا تُعدّل") 
+        self.assertIn("نسخة خاصة بك", interaction.response.sent["embed"].footer.text)
+
+    def test_navigation_inside_the_private_copy_edits_it_in_place(self):
+        interaction = FakeInteraction(ephemeral=True)
+        self._press(bot.RoleBoardView(1), "_go_prev", interaction)
+        self.assertIsNone(interaction.response.sent, "لا نرسل رسالة جديدة داخل النسخة الخاصة")
+        self.assertIsNotNone(interaction.response.edited)
+        self.assertTrue(interaction.response.edited["embed"].footer.text.startswith("صفحة 1"))
+
+    def test_filter_button_on_the_public_board_opens_a_private_copy(self):
+        view = bot.RoleBoardView(0)
+        interaction = FakeInteraction(ephemeral=False)
+        asyncio.run(self._filter_button(view, "🟢 الإوز").callback(interaction))
+        sent = interaction.response.sent
+        self.assertTrue(sent["ephemeral"])
+        self.assertIn("الإوز", sent["embed"].footer.text)
+        self.assertEqual(sent["view"].team, "goose")
+
+    def test_public_board_tells_visitors_their_clicks_are_private(self):
+        self.assertIn("نسخة خاصة بك", bot.build_panel_embed(0).description)
+        self.assertNotIn("نسخة خاصة بك", bot.build_panel_embed(0, private=True).description)
+
+    def test_private_copy_still_offers_every_button(self):
+        private = bot.RoleBoardView(2, "duck")
+        labels = [item.label for item in private.children]
+        for wanted in ("⬅️ السابق", "التالي ➡️", "🎲 دور عشوائي", "🟢 الإوز", "📖 كل الأدوار"):
+            self.assertIn(wanted, labels)
 
 
 class TestKeepAlive(unittest.TestCase):

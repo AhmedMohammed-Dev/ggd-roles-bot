@@ -1268,8 +1268,12 @@ def page_roles(page: int, team: Optional[str] = None) -> List[str]:
     return keys[start : start + PER_PAGE]
 
 
-def build_panel_embed(page: int, team: Optional[str] = None) -> discord.Embed:
-    """اللوحة الرئيسية: شرح الاستخدام + أعداد الفئات + أدوار الصفحة + بانر اللعبة."""
+def build_panel_embed(page: int, team: Optional[str] = None, private: bool = False) -> discord.Embed:
+    """اللوحة الرئيسية: شرح الاستخدام + أعداد الفئات + أدوار الصفحة + بانر اللعبة.
+
+    private=True تعني أن هذه نسخة خاصة بالضاغط (بعد ضغط زر تنقل)، فنكتب ذلك في التذييل
+    حتى يعرف المستخدم أن تنقلاته في اللوحة العامة لا تحرّك شيئاً عند غيره.
+    """
     team = team if team in TEAMS else None
     keys = page_roles(page, team)
     counts = {name: sum(1 for role in ROLES.values() if role["team"] == name) for name in TEAMS}
@@ -1281,7 +1285,12 @@ def build_panel_embed(page: int, team: Optional[str] = None) -> discord.Embed:
             "الرسالة تُرسل بشكل خاص فلا يراها أحد غيرك في الروم.\n\n"
             "**دلالة الألوان:** 🟢 إوز (Goose) • 🔴 بط (Duck) • 🟡 محايد (Neutral)\n\n"
             "**الأوضاع:** 🎮 Classic • 💀 Corruption • 🎃 Trick or Treat • 🍗 TLC • 🦉 Hoot & Seek\n"
-            "**أزرار التصفية** في الأسفل تعرض فئة واحدة فقط، و«دور عشوائي» يختار لك دوراً فوراً."
+            "**أزرار التصفية** في الأسفل تعرض فئة واحدة فقط، و«دور عشوائي» يختار لك دوراً فوراً.\n"
+            + (
+                ""
+                if private
+                else "\n🔒 **التنقل والتصفية يفتحان لك نسخة خاصة بك** — هذه اللوحة لا تتغير على الآخرين."
+            )
         ),
         color=PANEL_COLOR,
         timestamp=datetime.now(timezone.utc),
@@ -1306,10 +1315,8 @@ def build_panel_embed(page: int, team: Optional[str] = None) -> discord.Embed:
 
     embed.set_image(url=BRAND["banner"])
     scope = f"{TEAMS[team]['label']} فقط" if team else "كل الأدوار"
-    embed.set_footer(
-        text=f"صفحة {page + 1} من {total_pages(team)} • {scope} • {len(ROLES)} دوراً",
-        icon_url=BRAND["logo"],
-    )
+    footer = f"صفحة {page + 1} من {total_pages(team)} • {scope} • {len(ROLES)} دوراً"
+    embed.set_footer(text=footer + (" • نسخة خاصة بك" if private else ""), icon_url=BRAND["logo"])
     return embed
 
 
@@ -1462,23 +1469,45 @@ class RoleBoardView(discord.ui.View):
         """يعيد اللوحة لبدايتها مفلترة على الفئة المختارة (الصفحة تُصفَّر فلا يضيع المستخدم)."""
 
         async def _callback(interaction: discord.Interaction) -> None:
-            await interaction.response.edit_message(
-                embed=build_panel_embed(0, team), view=RoleBoardView(0, team)
-            )
+            await self._show_board(interaction, 0, team)
 
         return _callback
 
-    async def _go_prev(self, interaction: discord.Interaction) -> None:
-        target = max(0, self.page - 1)
+    async def _show_board(self, interaction: discord.Interaction, page: int, team: Optional[str]) -> None:
+        """يعرض لوحة التنقل/التصفية في مكانها الصحيح حسب نوع الرسالة المضغوط عليها.
+
+        المشكلة التي يحلها هذا التابع: اللوحة العامة (من ‎/roles‎) يراها الروم كله، فأي
+        تنقل فيها كان يقلب الصفحة على جميع الحاضرين في نفس اللحظة — اثنان يضغطان
+        «التالي» في وقت واحد فيتغير الشكل عند الاثنين معاً.
+
+        الحل: أول ضغطة تنقل على اللوحة العامة تفتح للضاغط **نسخة خاصة به** (ephemeral)،
+        واللوحة العامة تبقى كما هي ولا تتغير على أحد. أما داخل النسخة الخاصة فالتنقل
+        يعدّل الرسالة نفسها في مكانها (فهي له وحده أصلاً).
+        """
+        if not guild_allowed(interaction):
+            await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
+            return
+
+        message = interaction.message
+        is_public = message is None or not message.flags.ephemeral
+
+        if is_public:
+            await interaction.response.send_message(
+                embed=build_panel_embed(page, team, private=True),
+                view=RoleBoardView(page, team),
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.edit_message(
-            embed=build_panel_embed(target, self.team), view=RoleBoardView(target, self.team)
+            embed=build_panel_embed(page, team, private=True), view=RoleBoardView(page, team)
         )
 
+    async def _go_prev(self, interaction: discord.Interaction) -> None:
+        await self._show_board(interaction, max(0, self.page - 1), self.team)
+
     async def _go_next(self, interaction: discord.Interaction) -> None:
-        target = min(total_pages(self.team) - 1, self.page + 1)
-        await interaction.response.edit_message(
-            embed=build_panel_embed(target, self.team), view=RoleBoardView(target, self.team)
-        )
+        await self._show_board(interaction, min(total_pages(self.team) - 1, self.page + 1), self.team)
 
     async def _random(self, interaction: discord.Interaction) -> None:
         if not guild_allowed(interaction):
