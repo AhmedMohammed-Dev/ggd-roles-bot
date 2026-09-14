@@ -19,11 +19,18 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
-from typing import List
+from typing import Dict, List
+from unittest import mock
+
+import discord
 
 import bot
 
 OUT = Path(__file__).resolve().parent / "_board_preview.html"
+
+# في المعاينة فقط: نربط معرّف إيموجي مزيّف برابط صورة الدور، حتى نرى الشكل النهائي
+# بعد رفع الإيموجيات المخصصة بلا حاجة إلى رفعها فعلاً في سيرفر حقيقي.
+SIM_IMAGES: Dict[str, str] = {}
 
 
 def esc(text: str) -> str:
@@ -33,6 +40,7 @@ def esc(text: str) -> str:
 def md(text: str) -> str:
     """تحويل ماركداون ديسكورد البسيط إلى HTML (عريض/مائل/كود/روابط)."""
     out = esc(text)
+    out = re.sub(r"&lt;(a?):(\w+):(\d+)&gt;", lambda m: emoji_img(str(m.group(3))), out)
     out = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r'<a href="\2" target="_blank">\1</a>', out)
     out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
     out = re.sub(r"(?<!\*)\*(?!\*)(.+?)\*", r"<i>\1</i>", out)
@@ -42,6 +50,25 @@ def md(text: str) -> str:
 
 def icon(url: str | None, cls: str) -> str:
     return f'<img class="{cls}" src="{esc(url)}">' if url else ""
+
+
+def emoji_img(emoji_id: str) -> str:
+    """رسم إيموجي مخصص كصورة (نسخة المعاينة تربطه بصورة الدور المحلية عن قصد)."""
+    url = SIM_IMAGES.get(emoji_id, f"https://cdn.discordapp.com/emojis/{emoji_id}.png")
+    return f'<img class="emoji" src="{esc(url)}">'
+
+
+def button_emoji(item) -> str:
+    """إيموجي الزر: صورة إن كان مخصصاً، أو الإيموجي الخام إن كان عادياً."""
+    emoji = getattr(item, "emoji", None)
+    if emoji is None:
+        return ""
+    if isinstance(emoji, discord.PartialEmoji):
+        # ديسكورد يحوّل الإيموجي العام أيضاً إلى PartialEmoji بلا معرّف
+        if emoji.id is not None:
+            return emoji_img(str(emoji.id)) + " "
+        return esc(emoji.name or "") + " "
+    return esc(str(emoji)) + " "
 
 
 def fields_html(fields) -> str:
@@ -98,7 +125,7 @@ def buttons_html(view) -> str:
     for row in sorted(rows):
         cells = "".join(
             f'<span class="btn {BUTTON_CLASS.get(str(item.style).split(".")[-1], "b-grey")}'
-            f'{" disabled" if item.disabled else ""}">{esc(item.label)}</span>'
+            f'{" disabled" if item.disabled else ""}">{button_emoji(item)}{esc(item.label)}</span>'
             for item in rows[row]
         )
         out.append(f'<div class="btn-row">{cells}</div>')
@@ -130,13 +157,28 @@ def page(title: str, body: str) -> str:
   .footer-icon {{ width:16px; height:16px; border-radius:50%; }}
   /* ديسكورد يرتب الأزرار من اليسار لليمين دائماً (حتى مع نص عربي) */
   .btn-row {{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; max-width:520px; direction:ltr; }}
-  .btn {{ background:#4e5058; color:#fff; font-size:14px; padding:8px 12px; border-radius:8px; white-space:nowrap; }}
+  .btn {{ background:#4e5058; color:#fff; font-size:14px; padding:8px 12px; border-radius:8px;
+          white-space:nowrap; display:inline-flex; align-items:center; gap:6px; }}
+  .emoji {{ width:18px; height:18px; border-radius:3px; }}
   .b-green {{ background:#248046; }} .b-red {{ background:#da373c; }}
   .b-blue {{ background:#5865f2; }} .disabled {{ opacity:.45; }}
   .wrap {{ display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }}
   .ephemeral-note {{ font-size:12px; color:#b5bac1; background:#2b2d31; border-radius:6px 6px 0 0;
                      padding:6px 12px; max-width:520px; }}
 </style></head><body>{body}</body></html>"""
+
+
+def simulated_map() -> Dict[str, Dict[str, Dict[str, object]]]:
+    """خريطة إيموجيات مزيّفة (للمعاينة فقط): كل دور عنده صورة يُربط بصورته مباشرةً."""
+    mapping: Dict[str, Dict[str, object]] = {}
+    for index, role_key in enumerate(bot.ordered_role_keys(), start=1):
+        role = bot.ROLES[role_key]
+        if not role.get("image"):
+            continue  # بلا صورة رسمية: يبقى الإيموجي العام كما هو في الواقع
+        emoji_id = str(index)
+        SIM_IMAGES[emoji_id] = bot.emoji_image_url(role["image"])
+        mapping[role_key] = {"id": emoji_id, "name": bot.emoji_slug(role_key), "animated": False}
+    return {"1": mapping}
 
 
 def main() -> None:
@@ -151,6 +193,19 @@ def main() -> None:
         f'<div>{embed_html(bot.build_panel_embed(0, "goose", private=True))}'
         f'{buttons_html(bot.RoleBoardView(0, "goose"))}</div>'
     )
+
+    # محاكاة الشكل بعد تشغيل أمر "إيموجيات": الأزرار وعنوان البطاقة بصور الأدوار الحقيقية
+    with mock.patch.dict(bot._emoji_map, simulated_map(), clear=True):
+        guild_id = 1
+        body += (
+            '<h2>٤) نفس اللوحة بعد رفع الإيموجيات المخصصة (محاكاة أمر «إيموجيات»)</h2>'
+            f'<div>{embed_html(bot.build_panel_embed(0, guild_id=guild_id))}'
+            f'{buttons_html(bot.RoleBoardView(0, guild_id=guild_id))}</div>'
+            '<h2>٥) بطاقة الدور بعد رفع الإيموجيات (الصورة الحقيقية في العنوان وفي سطر الفئة)</h2>'
+            f'<div class="wrap">{embed_html(bot.build_role_embed("sheriff", guild_id))}'
+            f'{embed_html(bot.build_role_embed("assassin", guild_id))}</div>'
+        )
+
     OUT.write_text(page("معاينة لوحة الأدوار", body), encoding="utf-8")
     print(f"✅ تم إنشاء المعاينة: {OUT}")
 

@@ -341,6 +341,129 @@ class TestBoardLook(unittest.TestCase):
             self.assertEqual(bot.related_roles(key), bot.related_roles(key))
 
 
+class TestCustomEmojis(unittest.TestCase):
+    """إيموجيات السيرفر المخصصة: صورة كل دور تظهر على زرّه بدل الإيموجي العام."""
+
+    def test_every_role_image_is_requested_as_small_png(self):
+        """ديسكورد يرفض webp وأي صورة أكبر من 256KB، وويكي اللعبة تُرجع webp افتراضياً."""
+        for key, role in bot.ROLES.items():
+            if not role.get("image"):
+                continue
+            url = bot.emoji_image_url(role["image"])
+            self.assertIn("format=png", url, key)
+            self.assertIn(f"scale-to-width-down/{bot.EMOJI_IMAGE_SIZE}", url, key)
+            self.assertEqual(url.count("scale-to-width-down"), 1, f"مضاعفة التصغير في {key}")
+
+    def test_slugs_are_valid_unique_discord_emoji_names(self):
+        slugs = [bot.emoji_slug(key) for key in bot.ROLES]
+        self.assertEqual(len(slugs), len(set(slugs)), "أسماء إيموجيات مكرّرة")
+        for slug in slugs:
+            self.assertRegex(slug, r"^[a-z0-9_]{2,32}$")
+            self.assertTrue(slug.startswith(bot.EMOJI_NAME_PREFIX))
+
+    def test_candidates_skip_imageless_and_already_uploaded_roles(self):
+        everything = bot.emoji_upload_candidates(set())
+        with_image = {key for key, role in bot.ROLES.items() if role.get("image")}
+        self.assertEqual(sorted(everything), sorted(with_image))
+        self.assertEqual(everything[0], "goose", "أولوية الرفع تبدأ بأدوار الصفحة الأولى")
+
+        uploaded = {bot.emoji_slug("goose"), bot.emoji_slug("sheriff")}
+        remaining = bot.emoji_upload_candidates(uploaded)
+        self.assertNotIn("goose", remaining)
+        self.assertNotIn("sheriff", remaining)
+        self.assertEqual(len(remaining), len(with_image) - 2)
+
+    def test_falls_back_to_the_unicode_emoji_without_custom_ones(self):
+        self.assertEqual(bot.icon_for("sheriff"), bot.ROLES["sheriff"]["emoji"])
+        self.assertEqual(bot.icon_markup("sheriff"), bot.ROLES["sheriff"]["emoji"])
+        self.assertIsNone(bot.custom_icon("sheriff", 12345))
+        self.assertIn(bot.ROLES["sheriff"]["emoji"], bot.build_role_embed("sheriff").title)
+
+    def test_uses_the_custom_icon_when_the_guild_has_it(self):
+        mapping = {"123": {"sheriff": {"id": "999", "name": "ggd_sheriff", "animated": False}}}
+        with mock.patch.dict(bot._emoji_map, mapping, clear=True):
+            icon = bot.icon_for("sheriff", 123)
+            self.assertIsInstance(icon, discord.PartialEmoji)
+            self.assertEqual(icon.id, 999)
+            self.assertEqual(bot.icon_markup("sheriff", 123), "<:ggd_sheriff:999>")
+
+            button = bot.RoleButton("sheriff", row=0, guild_id=123)
+            self.assertEqual(button.label, bot.ROLES["sheriff"]["name_ar"])
+            self.assertEqual(button.emoji.id, 999)
+
+            card = bot.build_role_embed("sheriff", 123)
+            self.assertIn("999", card.author.icon_url or "")
+            self.assertIn("<:ggd_sheriff:999>", card.title)
+
+    def test_emoji_map_round_trip_on_disk(self):
+        mapping = {"1": {"goose": {"id": "5", "name": "ggd_goose", "animated": False}}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "role_emojis.json"
+            with mock.patch.object(bot, "EMOJI_MAP_PATH", path):
+                self.assertTrue(bot.save_emoji_map(mapping))
+                self.assertEqual(bot.load_emoji_map(), mapping)
+
+    def test_broken_emoji_map_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "role_emojis.json"
+            path.write_text("{هذا ليس JSON}", encoding="utf-8")
+            with mock.patch.object(bot, "EMOJI_MAP_PATH", path):
+                self.assertEqual(bot.load_emoji_map(), {})
+
+    def test_invite_url_requests_manage_expressions(self):
+        self.assertEqual(bot.BOT_PERMISSIONS, 19456 + (1 << 30))
+        self.assertIn(f"permissions={bot.BOT_PERMISSIONS}", bot.invite_url(12345))
+
+    def test_new_commands_are_registered_with_arabic_names(self):
+        names = {command.name for command in bot.client.tree.get_commands()}
+        self.assertIn("roles", names)
+        self.assertIn("دور", names)
+        self.assertIn("إيموجيات", names)
+
+
+class TestRoleSearch(unittest.TestCase):
+    """البحث السريع بالاسم — اللي يشغّل أمر ‎/دور‎ واقتراحاته التلقائية."""
+
+    def test_finds_roles_by_arabic_name(self):
+        self.assertEqual(bot.find_role("شريف"), "sheriff")
+        self.assertEqual(bot.find_role("السفاح"), "assassin")
+        self.assertEqual(bot.find_role("الكندي"), "canadian")
+
+    def test_ignores_diacritics_and_alef_variants(self):
+        self.assertEqual(bot.find_role("الشَّريف"), "sheriff")
+        self.assertEqual(bot.find_role("اوز"), bot.find_role("إوز"))
+        self.assertEqual(bot.find_role("الحالم الواعى"), "lucid_dreamer")
+
+    def test_works_with_english_names_and_keys(self):
+        self.assertEqual(bot.find_role("sheriff"), "sheriff")
+        self.assertEqual(bot.find_role("lover_goose"), "lover_goose")
+        self.assertEqual(bot.find_role("lucid dreamer"), "lucid_dreamer")
+        self.assertEqual(bot.find_role("LUCID DREAMER"), "lucid_dreamer")
+
+    def test_exact_match_ranks_before_partial_ones(self):
+        first, _ = bot.search_roles("الإوزة")[0]
+        self.assertEqual(first, "goose")
+
+    def test_empty_query_offers_the_first_page(self):
+        hits = bot.search_roles("")
+        self.assertEqual(hits[0][0], "goose")
+        self.assertEqual([key for key, _ in hits][: bot.PER_PAGE], bot.page_roles(0))
+
+    def test_choices_fit_discord_limits(self):
+        for query in ("", "goose", "ا", "role"):
+            hits = bot.search_roles(query)
+            self.assertLessEqual(len(hits), 25, query)
+            for key, label in hits:
+                self.assertIn(key, bot.ROLES)
+                self.assertIn(bot.ROLES[key]["name_ar"], label)
+                self.assertLessEqual(len(label), 100)
+                self.assertNotEqual(label.strip(), "")
+
+    def test_unknown_query_returns_nothing(self):
+        self.assertEqual(bot.search_roles("zzzzzz"), [])
+        self.assertIsNone(bot.find_role("zzzzzz"))
+
+
 class FakeResponse:
     """رد تفاعل مزيّف: يسجّل هل أرسلنا رسالة جديدة أم عدّلنا الموجودة."""
 
@@ -364,7 +487,9 @@ class FakeInteraction:
         self.message.flags.ephemeral = ephemeral
         self.user = mock.Mock(id=1)
         # السيرفر المسموح من الإعدادات (أو أي معرّف إن لم تُفعَّل القائمة البيضاء)
-        self.guild = mock.Mock(id=next(iter(bot.ALLOWED_GUILD_IDS), 2))
+        guild_id = next(iter(bot.ALLOWED_GUILD_IDS), 2)
+        self.guild = mock.Mock(id=guild_id)
+        self.guild_id = guild_id
 
 
 class TestPrivateNavigation(unittest.TestCase):

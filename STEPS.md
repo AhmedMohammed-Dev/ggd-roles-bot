@@ -191,11 +191,14 @@ python bot.py
 3. بدّله في هذا الرابط وافتحه في المتصفح:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&permissions=19456&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&permissions=1073761280&scope=bot%20applications.commands
 ```
 
 4. اختر سيرفرك → **Authorize**.
-   - 💡 الصلاحيات هنا للقراءة والكتابة فقط. **لا تعطِ البوت صلاحية Administrator أبداً.**
+   - 💡 الصلاحيات هنا للقراءة والكتابة + **إدارة التعبيرات** (لأمر `/إيموجيات` الذي يعرض
+     صور الأدوار على الأزرار). **لا تعطِ البوت صلاحية Administrator أبداً.**
+   - إن أردت أعلى تقييد: استبدل الرقم `1073761280` بـ `19456` — كل شيء سيعمل عدا
+     الإيموجيات المخصصة (تبقى الأزرار بالإيموجي العام).
 
 ### الآن جرّبه
 

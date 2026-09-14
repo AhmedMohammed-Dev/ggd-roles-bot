@@ -15,11 +15,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
 import logging
 import math
 import os
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -1162,14 +1165,290 @@ def wiki_link(role: Dict[str, Any]) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4) بناء الرسائل (Embeds)
+# 4) أدوات العرض: إيموجيات الأدوار المخصصة + البحث بالاسم
+#    الإيموجيات المخصصة: تُرفع صورة كل دور كإيموجي في السيرفر (بأمر ‎/emojis‎)،
+#    فيصبح زر الدور بأيقونته الحقيقية بدل إيموجي ديسكورد العام. والخريطة تُحفظ
+#    لكل سيرفر في role_emojis.json، وإن لم تُهيّأ بعد يرجع البوت بسلاسة
+#    لإيموجي ديسكورد العام بدون أي رسالة خطأ.
+# ══════════════════════════════════════════════════════════════════════════════
+
+EMOJI_MAP_PATH = Path(__file__).resolve().parent / "role_emojis.json"
+EMOJI_NAME_PREFIX = "ggd_"  # بادئة تعزل إيموجيات البوت عن إيموجيات السيرفر
+EMOJI_IMAGE_SIZE = 128      # ديسكورد يعرض 128×128 ويرفض أي صورة أكبر من 256KB
+EMOJI_MAX_BYTES = 256 * 1024
+# ويكي اللعبة ترفض الطلبات بلا وكيل مستخدم معروف، وتحوّل الصور إلى webp إلا إذا
+# طلبنا ‎format=png‎ صراحةً (وديسكورد لا يقبل webp في الإيموجيات).
+EMOJI_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    ),
+    "Referer": "https://goose-goose-duck.fandom.com/",
+}
+
+# صلاحيات رابط الدعوة: عرض الروم + إرسال الرسائل + روابط التضمين + إدارة التعبيرات
+# (الأخيرة مطلوبة لرفع الإيموجيات فقط — لو لم تمنحها فالبوت يعمل عادي بالإيموجي العام)
+BOT_PERMISSIONS = 19456 + (1 << 30)
+
+_emoji_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+
+def emoji_slug(role_key: str) -> str:
+    """اسم الإيموجي في ديسكورد: حروف إنجليزية صغيرة وأرقام وشرطة سفلية فقط (حتى 32 حرفاً)."""
+    return (EMOJI_NAME_PREFIX + re.sub(r"[^a-z0-9_]", "_", role_key.lower()))[:32]
+
+
+def emoji_image_url(url: str) -> str:
+    """رابط نسخة صغيرة بصيغة PNG من صورة الدور.
+
+    لماذا؟ ديسكورد يرفض webp (وهي الصيغة التي تُرجعها ويكي اللعبة تلقائياً)،
+    ويرفض أي صورة أكبر من 256KB — فنجلب 128×128 بصيغة PNG.
+    """
+    if "/scale-to-width-down/" in url:
+        url = re.sub(r"/scale-to-width-down/\d+", f"/scale-to-width-down/{EMOJI_IMAGE_SIZE}", url, count=1)
+    else:
+        url = url.replace("/revision/latest", f"/revision/latest/scale-to-width-down/{EMOJI_IMAGE_SIZE}", 1)
+    return url + ("&" if "?" in url else "?") + "format=png"
+
+
+def load_emoji_map() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """يقرأ خريطة الإيموجيات من متغيّر البيئة ROLE_EMOJIS_JSON أو من الملف المحلي.
+
+    لماذا متغيّر بيئة أيضاً؟ لأن منصّات الاستضافة تمسح الملفات مع كل نشرة،
+    فتحفظ الخريطة هناك مرة واحدة ولا تحتاج رفع الإيموجيات من جديد.
+    """
+    def clean(data: object) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        if not isinstance(data, dict):
+            return {}
+        return {str(guild): dict(entries) for guild, entries in data.items() if isinstance(entries, dict)}
+
+    raw = env_str("ROLE_EMOJIS_JSON")
+    if raw:
+        try:
+            return clean(json.loads(raw))
+        except ValueError:
+            log.warning("ROLE_EMOJIS_JSON ليس JSON صالحاً — سأعتمد على الملف المحلي.")
+
+    try:
+        return clean(json.loads(EMOJI_MAP_PATH.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return {}  # لا خريطة بعد: البوت يرجع للإيموجي العام بلا مشاكل
+
+
+def save_emoji_map(mapping: Dict[str, Dict[str, Dict[str, Any]]]) -> bool:
+    try:
+        EMOJI_MAP_PATH.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except OSError as error:
+        log.warning("لم أستطع حفظ role_emojis.json: %s", error)
+        return False
+
+
+def refresh_emoji_map() -> None:
+    """يعيد تحميل الخريطة من الملف/البيئة عند بدء التشغيل."""
+    global _emoji_map
+    _emoji_map = load_emoji_map()
+
+
+def custom_icon(role_key: str, guild_id: Optional[int] = None) -> Optional[discord.PartialEmoji]:
+    """إيموجي السيرفر المخصص لهذا الدور، أو None إن لم يُرفع بعد."""
+    if not guild_id:
+        return None
+    entry = (_emoji_map.get(str(guild_id)) or {}).get(role_key)
+    if not isinstance(entry, dict) or not entry.get("id"):
+        return None
+    name = str(entry.get("name") or emoji_slug(role_key))
+    return discord.PartialEmoji(name=name, id=int(entry["id"]), animated=bool(entry.get("animated")))
+
+
+def icon_for(role_key: str, guild_id: Optional[int] = None) -> Any:
+    """أيقونة الدور للأزرار: إيموجي السيرفر المخصص إن وُجد، وإلا إيموجي ديسكورد العام."""
+    return custom_icon(role_key, guild_id) or ROLES[role_key]["emoji"]
+
+
+def icon_markup(role_key: str, guild_id: Optional[int] = None) -> str:
+    """نفس الأيقونة لكن كنص يصلح داخل نص الإيمبيد: ‎<:name:id>‎ أو إيموجي عام."""
+    custom = custom_icon(role_key, guild_id)
+    if custom is None:
+        return ROLES[role_key]["emoji"]
+    return f"<{'a' if custom.animated else ''}:{custom.name}:{custom.id}>"
+
+
+def emoji_upload_candidates(existing_names: Set[str]) -> List[str]:
+    """الأدوار التي تحتاج إيموجي مخصصاً، بترتيب الأولوية (أدوار الصفحة الأولى أولاً).
+
+    تُستثنى الأدوار بلا صورة رسمية، والأدوار التي رُفع لها إيموجي بالفعل.
+    """
+    return [
+        key
+        for key in ordered_role_keys()
+        if ROLES[key].get("image") and emoji_slug(key) not in existing_names
+    ]
+
+
+def fetch_role_image(url: str) -> Optional[bytes]:
+    """ينزّل صورة الدور بصيغة PNG صغيرة، ويرجع None إن تجاوزت الحد أو فشل التحميل."""
+    try:
+        request = urllib.request.Request(emoji_image_url(url), headers=EMOJI_HEADERS)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(EMOJI_MAX_BYTES + 1)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        log.warning("فشل تحميل صورة الدور: %s", type(error).__name__)
+        return None
+    if len(data) > EMOJI_MAX_BYTES:
+        log.warning("صورة أكبر من حد ديسكورد (%d بايت) — سأتجاهلها", len(data))
+        return None
+    return data
+
+
+async def upload_role_emojis(guild: discord.Guild) -> Dict[str, Any]:
+    """يرفع صور الأدوار كإيموجيات في السيرفر ويثبّت الخريطة، بلا تكرار لما هو مرفوع."""
+    existing = {emoji.name: emoji for emoji in guild.emojis}
+    free_slots = max(0, guild.emoji_limit - len(guild.emojis))
+    mapping = _emoji_map.setdefault(str(guild.id), {})
+
+    added: List[str] = []
+    reused: List[str] = []
+    failed: List[str] = []
+
+    pending: List[str] = []
+    for key in emoji_upload_candidates(set(existing)):
+        found = existing.get(emoji_slug(key))
+        if found is not None:
+            # موجود من تشغيل سابق: نحدّث الخريطة فقط بدل رفع نسخة ثانية
+            mapping[key] = {"id": str(found.id), "name": found.name, "animated": bool(found.animated)}
+            reused.append(key)
+        else:
+            pending.append(key)
+
+    ready = pending[:free_slots]
+    no_slot = pending[free_slots:]
+
+    for key in ready:
+        data = await asyncio.to_thread(fetch_role_image, ROLES[key]["image"])
+        if data is None:
+            failed.append(key)
+            continue
+        try:
+            emoji = await guild.create_custom_emoji(
+                name=emoji_slug(key), image=data, reason="صور أدوار دليل Goose Goose Duck"
+            )
+        except discord.HTTPException as error:
+            log.warning("فشل رفع إيموجي %s: %s", key, error)
+            failed.append(key)
+            continue
+        mapping[key] = {"id": str(emoji.id), "name": emoji.name, "animated": bool(emoji.animated)}
+        added.append(key)
+
+    saved = save_emoji_map(_emoji_map)
+    return {
+        "added": added,
+        "reused": reused,
+        "failed": failed,
+        "no_slot": no_slot,
+        "free_slots": free_slots,
+        "limit": guild.emoji_limit,
+        "saved": saved,
+    }
+
+
+async def delete_role_emojis(guild: discord.Guild) -> Dict[str, int]:
+    """يحذف إيموجيات البوت (المميّزة ببادئة ggd_) ويمسح الخريطة — تراجع كامل بضغطة."""
+    deleted = 0
+    failed = 0
+    for emoji in list(guild.emojis):
+        if not emoji.name.startswith(EMOJI_NAME_PREFIX):
+            continue
+        try:
+            await emoji.delete(reason="تنظيف إيموجيات دليل Goose Goose Duck")
+        except discord.HTTPException:
+            failed += 1
+            continue
+        deleted += 1
+    _emoji_map[str(guild.id)] = {}
+    save_emoji_map(_emoji_map)
+    return {"deleted": deleted, "failed": failed}
+
+
+# ─────────────────────── البحث السريع بالاسم (أمر /role) ───────────────────────
+
+# توحيد شكل النص قبل المقارنة: بلا تشكيل، وبلا فرق بين أأإا والى وه/ة
+_ARABIC_FOLD = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ئ": "ي", "ة": "ه"})
+_DIACRITICS = re.compile(r"[\u064b-\u0652\u0670\u0640]")
+
+
+def normalize_search_text(text: str) -> str:
+    """يجهّز النص للبحث: بلا تشكيل ولا فروق إملائية، وبمسافات واحدة."""
+    folded = (text or "").translate(_ARABIC_FOLD)
+    folded = _DIACRITICS.sub("", folded)
+    folded = re.sub(r"[()_\-‑]", " ", folded)
+    return re.sub(r"\s+", " ", folded).strip().lower()
+
+
+def role_choice_label(role_key: str) -> str:
+    """نص الخيار في الاقتراحات التلقائية: إيموجي + عربي + إنجليزي."""
+    role = ROLES[role_key]
+    return f"{role['emoji']} {role['name_ar']} — {role['name_en']}"
+
+
+def search_roles(query: str, limit: int = 25) -> List[Tuple[str, str]]:
+    """يبحث عن أدوار بالاسم العربي أو الإنجليزي أو المعرّف، ويرجع (المفتاح، النص).
+
+    الترتيب: المطابقة الكاملة أولاً، ثم من يبدأ بالكلمة، ثم من يحتويها —
+    فالنتيجة الأقرب تظهر دائماً في أول الاقتراحات. ‎limit=25‎ لأن هذا حدّ ديسكورد.
+    """
+    needle = normalize_search_text(query)
+    scored: List[Tuple[int, int, str]] = []
+    for order, role_key in enumerate(ordered_role_keys()):
+        role = ROLES[role_key]
+        names = (
+            normalize_search_text(role["name_ar"]),
+            normalize_search_text(role["name_en"]),
+            normalize_search_text(role_key),
+        )
+        if not needle:
+            scored.append((3, order, role_key))
+            continue
+        if needle in names:
+            rank = 0
+        elif any(name.startswith(needle) for name in names):
+            rank = 1
+        elif any(needle in name for name in names):
+            rank = 2
+        else:
+            continue
+        scored.append((rank, order, role_key))
+
+    scored.sort()
+    return [(role_key, role_choice_label(role_key)) for _, _, role_key in scored[:limit]]
+
+
+def find_role(query: str) -> Optional[str]:
+    """أفضل دور يطابق النص المُدخل، أو None."""
+    hits = search_roles(query, limit=1)
+    return hits[0][0] if hits else None
+
+
+def invite_url(client_id: Optional[int] = None) -> str:
+    """رابط دعوة البوت بالصلاحيات المطلوبة — يظهره البوت لمن ينقصه صلاحية إضافية."""
+    app_id = client_id or (client.user.id if client.user else 0)
+    if not app_id:
+        return "https://discord.com/developers/applications"
+    return (
+        "https://discord.com/oauth2/authorize"
+        f"?client_id={app_id}&permissions={BOT_PERMISSIONS}&scope=bot%20applications.commands"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5) بناء الرسائل (Embeds)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def role_line(role_key: str) -> str:
+def role_line(role_key: str, guild_id: Optional[int] = None) -> str:
     """سطر مختصر لدور في قائمة اللوحة: إيموجي الدور + الاسم العربي + الإنجليزي."""
     role = ROLES[role_key]
-    return f"{role['emoji']} **{role['name_ar']}** — {role['name_en']}"
+    return f"{icon_markup(role_key, guild_id)} **{role['name_ar']}** — {role['name_en']}"
 
 
 def related_roles(role_key: str, limit: int = 3) -> List[str]:
@@ -1194,10 +1473,15 @@ def related_roles(role_key: str, limit: int = 3) -> List[str]:
     return picked
 
 
-def build_role_embed(role_key: str) -> discord.Embed:
-    """يبني بطاقة الدور: الاسم عربي/إنجليزي + الشرح + لون الفئة + صورة الدور."""
+def build_role_embed(role_key: str, guild_id: Optional[int] = None) -> discord.Embed:
+    """يبني بطاقة الدور: الاسم عربي/إنجليزي + الشرح + لون الفئة + صورة الدور.
+
+    guild_id اختياري: إن كانت إيموجيات السيرفر المخصصة مرفوعة نستخدم صورة الدور
+    كأيقونة في العنوان وفي سطر الفئة، وإلا نرجع لإيموجي ديسكورد العام.
+    """
     role = ROLES[role_key]
     team = TEAMS[role["team"]]
+    custom = custom_icon(role_key, guild_id)
 
     header = [f"**الفئة:** {team['label']}"]
     if role.get("mode"):
@@ -1210,14 +1494,15 @@ def build_role_embed(role_key: str) -> discord.Embed:
     header.append(f"🔗 [اعرف أكثر عن الدور على ويكي اللعبة]({wiki_link(role)})")
 
     embed = discord.Embed(
-        title=f"{role['emoji']} {role['name_ar']}  •  {role['name_en']}",
+        title=f"{icon_markup(role_key, guild_id)} {role['name_ar']}  •  {role['name_en']}",
         description="\n".join(header),
         color=team["color"],
         timestamp=datetime.now(timezone.utc),
     )
-    # سطر علوي يحدد الفئة فوراً قبل قراءة أي كلام
+    # سطر علوي يحدد الفئة فوراً قبل قراءة أي كلام، وبصورة الدور نفسها إن أمكن
     embed.set_author(
-        name=f"{team['emoji']} {team['short']} • {role['name_en']}", icon_url=BRAND["logo"]
+        name=f"{team['emoji']} {team['short']} • {role['name_en']}",
+        icon_url=custom.url if custom else BRAND["logo"],
     )
     embed.add_field(name="🎯 الهدف", value=role["goal"], inline=False)
     embed.add_field(name="🕹️ طريقة اللعب", value=role["how"], inline=False)
@@ -1268,7 +1553,9 @@ def page_roles(page: int, team: Optional[str] = None) -> List[str]:
     return keys[start : start + PER_PAGE]
 
 
-def build_panel_embed(page: int, team: Optional[str] = None, private: bool = False) -> discord.Embed:
+def build_panel_embed(
+    page: int, team: Optional[str] = None, private: bool = False, guild_id: Optional[int] = None
+) -> discord.Embed:
     """اللوحة الرئيسية: شرح الاستخدام + أعداد الفئات + أدوار الصفحة + بانر اللعبة.
 
     private=True تعني أن هذه نسخة خاصة بالضاغط (بعد ضغط زر تنقل)، فنكتب ذلك في التذييل
@@ -1306,12 +1593,16 @@ def build_panel_embed(page: int, team: Optional[str] = None, private: bool = Fal
     left, right = keys[:half], keys[half:]
     embed.add_field(
         name=f"📖 أدوار هذه الصفحة ({len(keys)})",
-        value="\n".join(role_line(key) for key in left) or "—",
+        value="\n".join(role_line(key, guild_id) for key in left) or "—",
         inline=True,
     )
     if right:
         # اسم حقل فارغ حتى يبقى العمود الثاني بجانب الأول
-        embed.add_field(name="\u200b", value="\n".join(role_line(key) for key in right), inline=True)
+        embed.add_field(
+            name="\u200b",
+            value="\n".join(role_line(key, guild_id) for key in right),
+            inline=True,
+        )
 
     embed.set_image(url=BRAND["banner"])
     scope = f"{TEAMS[team]['label']} فقط" if team else "كل الأدوار"
@@ -1321,7 +1612,7 @@ def build_panel_embed(page: int, team: Optional[str] = None, private: bool = Fal
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5) حماية بسيطة من السبام (Cooldown لكل مستخدم)
+# 6) حماية بسيطة من السبام (Cooldown لكل مستخدم)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _cooldowns: Dict[int, float] = {}
@@ -1356,23 +1647,24 @@ def guild_allowed(interaction: discord.Interaction) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6) واجهة الأزرار التفاعلية
+# 7) واجهة الأزرار التفاعلية
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 class RoleButton(discord.ui.Button):
     """زر دور واحد: الإجابة تظهر للضاغط فقط (ephemeral)."""
 
-    def __init__(self, role_key: str, row: int):
+    def __init__(self, role_key: str, row: int, guild_id: Optional[int] = None):
         role = ROLES[role_key]
-        team = TEAMS[role["team"]]
         styles = {
             "goose": discord.ButtonStyle.success,  # أخضر
             "duck": discord.ButtonStyle.danger,    # أحمر
             "neutral": discord.ButtonStyle.secondary,  # رمادي (لا يوجد أصفر في ديسكورد)
         }
         super().__init__(
-            label=f"{role['emoji']} {role['name_ar']}",
+            label=role["name_ar"],
+            # إيموجي السيرفر المخصص (صورة الدور) إن كانت مرفوعة، وإلا الإيموجي العام
+            emoji=icon_for(role_key, guild_id),
             style=styles.get(role["team"], discord.ButtonStyle.secondary),
             custom_id=f"ggd:role:{role_key}"[:100],
             row=row,
@@ -1394,20 +1686,23 @@ class RoleButton(discord.ui.Button):
             return
 
         # ⬅️ السطر الأهم: ephemeral=True تعني أن الرسالة للضاغط وحده
-        await interaction.response.send_message(embed=build_role_embed(self.role_key), ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_role_embed(self.role_key, interaction.guild_id), ephemeral=True
+        )
 
 
 class RoleBoardView(discord.ui.View):
     """لوحة الأزرار: أدوار الصفحة الحالية + التنقل بين الصفحات + تصفية بالفئات."""
 
-    def __init__(self, page: int = 0, team: Optional[str] = None):
+    def __init__(self, page: int = 0, team: Optional[str] = None, guild_id: Optional[int] = None):
         super().__init__(timeout=None)  # لا تنتهي صلاحية الأزرار
         self.team = team if team in TEAMS else None
+        self.guild_id = guild_id
         self.page = max(0, min(page, total_pages(self.team) - 1))
 
         current = page_roles(self.page, self.team)
         for index, role_key in enumerate(current):
-            self.add_item(RoleButton(role_key, row=0 if index < 5 else 1))
+            self.add_item(RoleButton(role_key, row=0 if index < 5 else 1, guild_id=guild_id))
 
         nav_row = 1 if len(current) <= 5 else 2
         self._add_navigation(nav_row)
@@ -1488,19 +1783,21 @@ class RoleBoardView(discord.ui.View):
             await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
             return
 
+        guild_id = interaction.guild_id
         message = interaction.message
         is_public = message is None or not message.flags.ephemeral
 
         if is_public:
             await interaction.response.send_message(
-                embed=build_panel_embed(page, team, private=True),
-                view=RoleBoardView(page, team),
+                embed=build_panel_embed(page, team, private=True, guild_id=guild_id),
+                view=RoleBoardView(page, team, guild_id=guild_id),
                 ephemeral=True,
             )
             return
 
         await interaction.response.edit_message(
-            embed=build_panel_embed(page, team, private=True), view=RoleBoardView(page, team)
+            embed=build_panel_embed(page, team, private=True, guild_id=guild_id),
+            view=RoleBoardView(page, team, guild_id=guild_id),
         )
 
     async def _go_prev(self, interaction: discord.Interaction) -> None:
@@ -1521,7 +1818,9 @@ class RoleBoardView(discord.ui.View):
             return
         # العشوائي يحترم التصفية الحالية: تصفية الإوز لا تعطيك بطة
         picked = random.choice(filtered_role_keys(self.team))
-        await interaction.response.send_message(embed=build_role_embed(picked), ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_role_embed(picked, interaction.guild_id), ephemeral=True
+        )
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
@@ -1538,7 +1837,7 @@ class RoleBoardView(discord.ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7) العميل (Bot)
+# 8) العميل (Bot)
 # ══════════════════════════════════════════════════════════════════════════════
 
 intents = discord.Intents.none()
@@ -1560,6 +1859,9 @@ client = commands.Bot(
 @client.event
 async def setup_hook() -> None:
     """تسجيل الأوامر: في سيرفر محدّد (فوري) أو عالمياً."""
+    # نحمّل خريطة إيموجيات الأدوار المخصصة مرة واحدة عند بدء التشغيل
+    refresh_emoji_map()
+    log.info("إيموجيات مخصصة محفوظة لـ %d سيرفر", len(_emoji_map))
     try:
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
@@ -1605,8 +1907,8 @@ async def roles_slash(
         await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
         return
 
-    embed = build_panel_embed(0)
-    view = RoleBoardView(0)
+    embed = build_panel_embed(0, guild_id=interaction.guild_id)
+    view = RoleBoardView(0, guild_id=interaction.guild_id)
 
     # إرسال اللوحة في نفس الروم: الرسالة عامة، لكن كل إجابة زر تبقى خاصة بالضاغط
     if channel is None or channel.id == interaction.channel_id:
@@ -1638,6 +1940,101 @@ async def roles_slash(
     await interaction.response.send_message(f"✅ تم إرسال اللوحة في {channel.mention}", ephemeral=True)
 
 
+async def role_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> List[app_commands.Choice[str]]:
+    """اقتراحات فورية أثناء الكتابة — حدّ ديسكورد 25 اقتراحاً في المرة."""
+    return [
+        app_commands.Choice(name=label[:100], value=role_key)
+        for role_key, label in search_roles(current)
+    ]
+
+
+# اسما الأمرين بالعربي مباشرةً: ديسكورد يسمح بالحروف التي لا مقابل صغير لها (العربية منها)،
+# فيظهر الأمر في قائمة ‎/‎ عند الجميع باسمه العربي — وهذا هو الشكل الذي يناسب سيرفر عربي.
+@client.tree.command(name="دور", description="🔎 ابحث عن دور بالاسم واعرض بطاقته فوراً")
+@app_commands.describe(query="اكتب جزءاً من اسم الدور بالعربي أو الإنجليزي")
+@app_commands.autocomplete(query=role_autocomplete)
+@app_commands.guild_only()
+async def role_slash(interaction: discord.Interaction, query: str) -> None:
+    """بحث سريع: يكتب المستخدم أول حروف اسم الدور فيصل لبطاقته مباشرةً."""
+    if not guild_allowed(interaction):
+        await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
+        return
+
+    remaining = cooldown_remaining(interaction.user.id)
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"⏳ على راحتك! جرّب مرة أخرى بعد {remaining:.1f} ثانية.", ephemeral=True, delete_after=3
+        )
+        return
+
+    # القيمة قد تكون مفتاح الدور (من الاقتراحات) أو نصاً كتبه المستخدم يدوياً
+    role_key = query if query in ROLES else find_role(query)
+    if role_key is None:
+        await interaction.response.send_message(
+            f"🔍 لم أجد دوراً باسم «{query}».\n"
+            "جرّب كتابة جزء من الاسم (عربي أو إنجليزي) أو استخدم ‎/roles‎ للوحة الكاملة.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        embed=build_role_embed(role_key, interaction.guild_id), ephemeral=True
+    )
+
+
+@client.tree.command(name="إيموجيات", description="🖼️ ارفع صور الأدوار كإيموجيات في السيرفر لتظهر على الأزرار")
+@app_commands.describe(remove="احذف إيموجيات البوت المرفوعة بدل رفعها")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def emojis_slash(interaction: discord.Interaction, remove: bool = False) -> None:
+    """تهيئة الإيموجيات المخصصة: ترفع صور الأدوار (128×128 PNG) وتحفظ خريطتها."""
+    if not guild_allowed(interaction):
+        await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
+        return
+    guild = interaction.guild
+    if guild is None:
+        return
+
+    if not remove and not guild.me.guild_permissions.manage_expressions:
+        await interaction.response.send_message(
+            "❌ أحتاج صلاحية **إدارة التعبيرات (Manage Expressions)** لرفع الإيموجيات.\n"
+            "أعد دعوتي بهذا الرابط (يحتوي الصلاحية الجديدة) ثم جرّب مرة أخرى:\n"
+            f"{invite_url()}",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    if remove:
+        result = await delete_role_emojis(guild)
+        summary = (
+            f"🧹 حذفت **{result['deleted']}** إيموجي"
+            + (f" • فشل حذف {result['failed']}" if result["failed"] else "")
+            + "\nعادت الأزرار للإيموجي العام — أعد إرسال اللوحة بـ ‎/roles‎."
+        )
+        await interaction.followup.send(summary, ephemeral=True)
+        return
+
+    result = await upload_role_emojis(guild)
+    lines = [
+        f"✅ رفعت **{len(result['added'])}** إيموجي جديد",
+        f"♻️ موجود سابقاً: **{len(result['reused'])}**",
+    ]
+    if result["failed"]:
+        lines.append(f"⚠️ فشل رفع {len(result['failed'])}: " + "، ".join(result["failed"][:8]))
+    if result["no_slot"]:
+        lines.append(
+            f"📦 لا توجد مقاعد كافية ({result['free_slots']} من {result['limit']}): "
+            f"بقي {len(result['no_slot'])} دوراً بالإيموجي العام — تزيد المقاعد بترقية السيرفر "
+            "(Boost) أو بحذف إيموجيات قديمة، ثم أعد الأمر."
+        )
+    lines.append("👉 أعد إرسال اللوحة بـ ‎/roles‎ لترى صور الأدوار على الأزرار.")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 if ENABLE_PREFIX_COMMANDS:
 
     @client.command(name="roles")
@@ -1648,7 +2045,10 @@ if ENABLE_PREFIX_COMMANDS:
         """!roles — يرسل لوحة الأدوار في الروم الحالي."""
         if ctx.guild and ALLOWED_GUILD_IDS and ctx.guild.id not in ALLOWED_GUILD_IDS:
             return
-        await ctx.send(embed=build_panel_embed(0), view=RoleBoardView(0))
+        guild_id = ctx.guild.id if ctx.guild else None
+        await ctx.send(
+            embed=build_panel_embed(0, guild_id=guild_id), view=RoleBoardView(0, guild_id=guild_id)
+        )
 
 
 @client.event
@@ -1679,7 +2079,7 @@ async def on_app_command_error(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 8) خادم Flask للإبقاء على الحياة (Keep-Alive 24/7)
+# 9) خادم Flask للإبقاء على الحياة (Keep-Alive 24/7)
 #    ملاحظة أمنية: وضع التصحيح (Debug) مُعطّل، ولا توجد أي نقطة نهاية تنفيذية — الفحص فقط.
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1777,7 +2177,7 @@ def start_self_ping() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 9) التشغيل
+# 10) التشغيل
 # ══════════════════════════════════════════════════════════════════════════════
 
 
