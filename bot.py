@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import json
 import logging
@@ -30,7 +29,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import discord
 from discord import app_commands
@@ -888,7 +887,9 @@ ROLES: Dict[str, Dict[str, Any]] = {
     "raven": {
         "name_ar": "الغراب",
         "name_en": "Raven",
-        "emoji": "🐦‍⬛",
+        # ⚠️ لا تستخدم إيموجي مركّباً برابط ZWJ (مثل 🐦‍⬛) هنا: أزرار ديسكورد ترفضه
+        # ويُسقط الرسالة كلها بخطأ 50035 — الحماية في safe_component_emoji أدناه.
+        "emoji": "🖤",
         "team": "neutral",
         "goal": "الفوز كآخر ناجٍ، مع قدرة على مغادرة الاجتماعات مؤقتاً لقتل أدوار محددة.",
         "how": "خلال الاجتماع يمكنك الخروج مؤقتاً لتنفيذ قتل مستهدف، وتكسب قدرة القتل في الخريطة إن مات كل البط. مهامك وهمية.",
@@ -1019,7 +1020,7 @@ ROLES: Dict[str, Dict[str, Any]] = {
     "crow": {
         "name_ar": "الغراب (المتحوّل)",
         "name_en": "Crow",
-        "emoji": "🐦⬛",
+        "emoji": "🦇",
         "team": "neutral",
         "mode": "corruption",
         "goal": "فساد الجميع ثم التحوّل إلى الغراب وقتل من تبقّى.",
@@ -1165,30 +1166,18 @@ def wiki_link(role: Dict[str, Any]) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4) أدوات العرض: إيموجيات الأدوار المخصصة + البحث بالاسم
-#    الإيموجيات المخصصة: تُرفع صورة كل دور كإيموجي في السيرفر (بأمر ‎/emojis‎)،
-#    فيصبح زر الدور بأيقونته الحقيقية بدل إيموجي ديسكورد العام. والخريطة تُحفظ
-#    لكل سيرفر في role_emojis.json، وإن لم تُهيّأ بعد يرجع البوت بسلاسة
-#    لإيموجي ديسكورد العام بدون أي رسالة خطأ.
+# 4) أدوات العرض: إيموجيات السيرفر (عرض فقط) + البحث بالاسم
+#    لو كانت إيموجيات الأدوار مرفوعة في السيرفر من قبل (ببادئة ggd_) فالبوت يعرض
+#    صورتها على زر الدور وفي بطاقته، والخريطة تُقرأ من role_emojis.json أو من متغيّر
+#    البيئة ROLE_EMOJIS_JSON. وإن لم توجد يرجع بسلاسة لإيموجي ديسكورد العام
+#    بدون أي رسالة خطأ. (رفع الإيموجيات صار يدويا من إعدادات السيرفر.)
 # ══════════════════════════════════════════════════════════════════════════════
 
 EMOJI_MAP_PATH = Path(__file__).resolve().parent / "role_emojis.json"
 EMOJI_NAME_PREFIX = "ggd_"  # بادئة تعزل إيموجيات البوت عن إيموجيات السيرفر
-EMOJI_IMAGE_SIZE = 128      # ديسكورد يعرض 128×128 ويرفض أي صورة أكبر من 256KB
-EMOJI_MAX_BYTES = 256 * 1024
-# ويكي اللعبة ترفض الطلبات بلا وكيل مستخدم معروف، وتحوّل الصور إلى webp إلا إذا
-# طلبنا ‎format=png‎ صراحةً (وديسكورد لا يقبل webp في الإيموجيات).
-EMOJI_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
-    ),
-    "Referer": "https://goose-goose-duck.fandom.com/",
-}
-
-# صلاحيات رابط الدعوة: عرض الروم + إرسال الرسائل + روابط التضمين + إدارة التعبيرات
-# (الأخيرة مطلوبة لرفع الإيموجيات فقط — لو لم تمنحها فالبوت يعمل عادي بالإيموجي العام)
-BOT_PERMISSIONS = 19456 + (1 << 30)
+# اسم الإيموجي المخصص في ديسكورد: حروف إنجليزية صغيرة/أرقام وشرطة سفلية، من 2 إلى 32 حرفاً
+EMOJI_NAME_RE = re.compile(r"^[a-z0-9_]{2,32}$")
+ZWJ = "\u200d"             # رابط تسلسلات الإيموجي المركّب (الذي ترفضه الأزرار)
 
 _emoji_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
@@ -1198,24 +1187,11 @@ def emoji_slug(role_key: str) -> str:
     return (EMOJI_NAME_PREFIX + re.sub(r"[^a-z0-9_]", "_", role_key.lower()))[:32]
 
 
-def emoji_image_url(url: str) -> str:
-    """رابط نسخة صغيرة بصيغة PNG من صورة الدور.
-
-    لماذا؟ ديسكورد يرفض webp (وهي الصيغة التي تُرجعها ويكي اللعبة تلقائياً)،
-    ويرفض أي صورة أكبر من 256KB — فنجلب 128×128 بصيغة PNG.
-    """
-    if "/scale-to-width-down/" in url:
-        url = re.sub(r"/scale-to-width-down/\d+", f"/scale-to-width-down/{EMOJI_IMAGE_SIZE}", url, count=1)
-    else:
-        url = url.replace("/revision/latest", f"/revision/latest/scale-to-width-down/{EMOJI_IMAGE_SIZE}", 1)
-    return url + ("&" if "?" in url else "?") + "format=png"
-
-
 def load_emoji_map() -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """يقرأ خريطة الإيموجيات من متغيّر البيئة ROLE_EMOJIS_JSON أو من الملف المحلي.
+    """يقرأ خريطة إيموجيات السيرفر من متغيّر البيئة ROLE_EMOJIS_JSON أو من الملف المحلي.
 
     لماذا متغيّر بيئة أيضاً؟ لأن منصّات الاستضافة تمسح الملفات مع كل نشرة،
-    فتحفظ الخريطة هناك مرة واحدة ولا تحتاج رفع الإيموجيات من جديد.
+    فتُحفظ الخريطة هناك مرة واحدة فلا تضيع صور الأزرار بعد كل نشر.
     """
     def clean(data: object) -> Dict[str, Dict[str, Dict[str, Any]]]:
         if not isinstance(data, dict):
@@ -1235,35 +1211,81 @@ def load_emoji_map() -> Dict[str, Dict[str, Dict[str, Any]]]:
         return {}  # لا خريطة بعد: البوت يرجع للإيموجي العام بلا مشاكل
 
 
-def save_emoji_map(mapping: Dict[str, Dict[str, Dict[str, Any]]]) -> bool:
-    try:
-        EMOJI_MAP_PATH.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True
-    except OSError as error:
-        log.warning("لم أستطع حفظ role_emojis.json: %s", error)
-        return False
-
-
 def refresh_emoji_map() -> None:
     """يعيد تحميل الخريطة من الملف/البيئة عند بدء التشغيل."""
     global _emoji_map
     _emoji_map = load_emoji_map()
 
 
+def prune_missing_emojis(guilds: Iterable[Any]) -> int:
+    """يحذف من الخريطة أي إيموجي لم يعد موجوداً فعلاً في السيرفر، ويرجع عدد المحذوف.
+
+    لماذا؟ لأن خريطة قديمة (إيموجي حُذف من السيرفر، أو نسخة محفوظة في ROLE_EMOJIS_JSON
+    من زمن سابق) تجعل ديسكورد يرفض الرسالة **كاملة** بخطأ 10014، فيتعطّل زر «التالي»
+    بلا أي سبب ظاهر للمستخدم. منع الخطأ من أصله أضمن من التعافي بعد حدوثه.
+
+    حماية مهمة: لو لم يرَ البوت إيموجيات السيرفر (قائمة فارغة) لا نحذف شيئاً —
+    فلا نخسر صور الأزرار بسبب مشكلة في الكاش.
+    """
+    removed = 0
+    for guild in guilds:
+        entries = _emoji_map.get(str(getattr(guild, "id", "")))
+        if not entries:
+            continue
+        names = {emoji.name for emoji in getattr(guild, "emojis", [])}
+        if not names:
+            continue
+        for role_key in [key for key, value in entries.items() if not isinstance(value, dict) or value.get("name") not in names]:
+            entries.pop(role_key, None)
+            removed += 1
+    if removed:
+        log.info("🧹 نظّفت %d إيموجي من الخريطة لأنه لم يعد موجوداً في السيرفر", removed)
+    return removed
+
+
 def custom_icon(role_key: str, guild_id: Optional[int] = None) -> Optional[discord.PartialEmoji]:
-    """إيموجي السيرفر المخصص لهذا الدور، أو None إن لم يُرفع بعد."""
+    """إيموجي السيرفر المخصص لهذا الدور، أو None إن لم يُرفع بعد أو كانت بياناته غير صالحة.
+
+    ولماذا نتحقق من صحة البيانات؟ لأن خريطة قديمة (إيموجي حُذف من السيرفر، أو نسخة
+    محفوظة من سيرفر آخر) تجعل ديسكورد يرفض الرسالة **كاملة**، فيتعطّل التنقل في اللوحة
+    بلا سبب ظاهر للمستخدم. الأفضل أن يرجع للإيموجي العام بدل أن يقع في ذلك.
+    """
     if not guild_id:
         return None
     entry = (_emoji_map.get(str(guild_id)) or {}).get(role_key)
-    if not isinstance(entry, dict) or not entry.get("id"):
+    if not isinstance(entry, dict):
+        return None
+    raw_id = str(entry.get("id") or "")
+    if not raw_id.isdigit():  # معرّف إيموجي ديسكورد رقم صحيح دائماً
         return None
     name = str(entry.get("name") or emoji_slug(role_key))
-    return discord.PartialEmoji(name=name, id=int(entry["id"]), animated=bool(entry.get("animated")))
+    if not EMOJI_NAME_RE.match(name):  # اسم غير صالح يرفضه ديسكورد أيضاً
+        return None
+    return discord.PartialEmoji(name=name, id=int(raw_id), animated=bool(entry.get("animated")))
 
 
 def icon_for(role_key: str, guild_id: Optional[int] = None) -> Any:
     """أيقونة الدور للأزرار: إيموجي السيرفر المخصص إن وُجد، وإلا إيموجي ديسكورد العام."""
     return custom_icon(role_key, guild_id) or ROLES[role_key]["emoji"]
+
+
+def safe_component_emoji(raw: str) -> str:
+    """ينقّي الإيموجي العام ليقبله ديسكورد داخل الأزرار.
+
+    الأزرار أشدّ من نصوص الإيمبيدات: ديسكورد يرفض فيها الإيموجي المركّب برابط ZWJ
+    (مثل 🐦‍⬛) بخطأ 50035 (Invalid Form Body)، ويُسقط الرسالة كلها — أي أن إيموجي
+    دور واحد يمنع فتح الصفحة بالكامل. فنُبقي المحرف الأساسي ونحذف بقي التسلسل.
+    """
+    base = (raw or "").split(ZWJ)[0].strip()
+    return base
+
+
+def button_emoji(role_key: str, guild_id: Optional[int] = None) -> Any:
+    """إيموجي زر الدور: المخصص إن كان صالحاً، وإلا الإيموجي العام منقّىً للأزرار."""
+    custom = custom_icon(role_key, guild_id)
+    if custom is not None:
+        return custom
+    return safe_component_emoji(ROLES[role_key]["emoji"]) or None
 
 
 def icon_markup(role_key: str, guild_id: Optional[int] = None) -> str:
@@ -1272,102 +1294,6 @@ def icon_markup(role_key: str, guild_id: Optional[int] = None) -> str:
     if custom is None:
         return ROLES[role_key]["emoji"]
     return f"<{'a' if custom.animated else ''}:{custom.name}:{custom.id}>"
-
-
-def emoji_upload_candidates(existing_names: Set[str]) -> List[str]:
-    """الأدوار التي تحتاج إيموجي مخصصاً، بترتيب الأولوية (أدوار الصفحة الأولى أولاً).
-
-    تُستثنى الأدوار بلا صورة رسمية، والأدوار التي رُفع لها إيموجي بالفعل.
-    """
-    return [
-        key
-        for key in ordered_role_keys()
-        if ROLES[key].get("image") and emoji_slug(key) not in existing_names
-    ]
-
-
-def fetch_role_image(url: str) -> Optional[bytes]:
-    """ينزّل صورة الدور بصيغة PNG صغيرة، ويرجع None إن تجاوزت الحد أو فشل التحميل."""
-    try:
-        request = urllib.request.Request(emoji_image_url(url), headers=EMOJI_HEADERS)
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read(EMOJI_MAX_BYTES + 1)
-    except (urllib.error.URLError, OSError, ValueError) as error:
-        log.warning("فشل تحميل صورة الدور: %s", type(error).__name__)
-        return None
-    if len(data) > EMOJI_MAX_BYTES:
-        log.warning("صورة أكبر من حد ديسكورد (%d بايت) — سأتجاهلها", len(data))
-        return None
-    return data
-
-
-async def upload_role_emojis(guild: discord.Guild) -> Dict[str, Any]:
-    """يرفع صور الأدوار كإيموجيات في السيرفر ويثبّت الخريطة، بلا تكرار لما هو مرفوع."""
-    existing = {emoji.name: emoji for emoji in guild.emojis}
-    free_slots = max(0, guild.emoji_limit - len(guild.emojis))
-    mapping = _emoji_map.setdefault(str(guild.id), {})
-
-    added: List[str] = []
-    reused: List[str] = []
-    failed: List[str] = []
-
-    pending: List[str] = []
-    for key in emoji_upload_candidates(set(existing)):
-        found = existing.get(emoji_slug(key))
-        if found is not None:
-            # موجود من تشغيل سابق: نحدّث الخريطة فقط بدل رفع نسخة ثانية
-            mapping[key] = {"id": str(found.id), "name": found.name, "animated": bool(found.animated)}
-            reused.append(key)
-        else:
-            pending.append(key)
-
-    ready = pending[:free_slots]
-    no_slot = pending[free_slots:]
-
-    for key in ready:
-        data = await asyncio.to_thread(fetch_role_image, ROLES[key]["image"])
-        if data is None:
-            failed.append(key)
-            continue
-        try:
-            emoji = await guild.create_custom_emoji(
-                name=emoji_slug(key), image=data, reason="صور أدوار دليل Goose Goose Duck"
-            )
-        except discord.HTTPException as error:
-            log.warning("فشل رفع إيموجي %s: %s", key, error)
-            failed.append(key)
-            continue
-        mapping[key] = {"id": str(emoji.id), "name": emoji.name, "animated": bool(emoji.animated)}
-        added.append(key)
-
-    saved = save_emoji_map(_emoji_map)
-    return {
-        "added": added,
-        "reused": reused,
-        "failed": failed,
-        "no_slot": no_slot,
-        "free_slots": free_slots,
-        "limit": guild.emoji_limit,
-        "saved": saved,
-    }
-
-
-async def delete_role_emojis(guild: discord.Guild) -> Dict[str, int]:
-    """يحذف إيموجيات البوت (المميّزة ببادئة ggd_) ويمسح الخريطة — تراجع كامل بضغطة."""
-    deleted = 0
-    failed = 0
-    for emoji in list(guild.emojis):
-        if not emoji.name.startswith(EMOJI_NAME_PREFIX):
-            continue
-        try:
-            await emoji.delete(reason="تنظيف إيموجيات دليل Goose Goose Duck")
-        except discord.HTTPException:
-            failed += 1
-            continue
-        deleted += 1
-    _emoji_map[str(guild.id)] = {}
-    save_emoji_map(_emoji_map)
-    return {"deleted": deleted, "failed": failed}
 
 
 # ─────────────────────── البحث السريع بالاسم (أمر /role) ───────────────────────
@@ -1427,17 +1353,6 @@ def find_role(query: str) -> Optional[str]:
     """أفضل دور يطابق النص المُدخل، أو None."""
     hits = search_roles(query, limit=1)
     return hits[0][0] if hits else None
-
-
-def invite_url(client_id: Optional[int] = None) -> str:
-    """رابط دعوة البوت بالصلاحيات المطلوبة — يظهره البوت لمن ينقصه صلاحية إضافية."""
-    app_id = client_id or (client.user.id if client.user else 0)
-    if not app_id:
-        return "https://discord.com/developers/applications"
-    return (
-        "https://discord.com/oauth2/authorize"
-        f"?client_id={app_id}&permissions={BOT_PERMISSIONS}&scope=bot%20applications.commands"
-    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1572,7 +1487,8 @@ def build_panel_embed(
             "الرسالة تُرسل بشكل خاص فلا يراها أحد غيرك في الروم.\n\n"
             "**دلالة الألوان:** 🟢 إوز (Goose) • 🔴 بط (Duck) • 🟡 محايد (Neutral)\n\n"
             "**الأوضاع:** 🎮 Classic • 💀 Corruption • 🎃 Trick or Treat • 🍗 TLC • 🦉 Hoot & Seek\n"
-            "**أزرار التصفية** في الأسفل تعرض فئة واحدة فقط، و«دور عشوائي» يختار لك دوراً فوراً.\n"
+            "**أزرار التصفية** في الأسفل تعرض فئة واحدة فقط، و«دور عشوائي» يختار لك دوراً فوراً."
+            " ولو احتجت شرحاً بالعربي اكتب ‎/help‎ أو ‎/مساعدة‎.\n"
             + (
                 ""
                 if private
@@ -1608,6 +1524,83 @@ def build_panel_embed(
     scope = f"{TEAMS[team]['label']} فقط" if team else "كل الأدوار"
     footer = f"صفحة {page + 1} من {total_pages(team)} • {scope} • {len(ROLES)} دوراً"
     embed.set_footer(text=footer + (" • نسخة خاصة بك" if private else ""), icon_url=BRAND["logo"])
+    return embed
+
+
+def build_help_embed() -> discord.Embed:
+    """بطاقة المساعدة (أمرا ‎/help‎ و‎/مساعدة‎): تشرح للعضو الجديد كيف يتعامل مع البوت.
+
+    لماذا بطاقة داخل أمر لا صفحة في الويكي؟ لأن أول ما يفعله العضو الجديد هو كتابة
+    «help» أو «مساعدة» في الروم — فتكون الإجابة أمامه فوراً، بالعربي وبلا حاجة لقراءة أي
+    دليل، وهي له وحده فلا تُزعج أحداً.
+    """
+    embed = discord.Embed(
+        title="❓ كيف تستخدم البوت؟ — دليل سريع",
+        description=(
+            "كل ما يرسله لك البوت **تراه أنت وحدك** 🤫 — لا يقرأ رسائلك ولا يحتاج منك أي إعداد.\n"
+            "اتّبع الخطوات بالترتيب:"
+        ),
+        color=PANEL_COLOR,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=f"{BRAND['name']} • {len(ROLES)} دوراً", icon_url=BRAND["logo"])
+    embed.add_field(
+        name="1️⃣ افتح اللوحة",
+        value="اكتب ‎/roles‎ في أي روم، فتظهر لك لوحة الأدوار (‎10‎ أدوار في كل صفحة).",
+        inline=False,
+    )
+    embed.add_field(
+        name="2️⃣ اضغط على أي دور",
+        value="تأتيك **بطاقة الدور كاملة**: الهدف • طريقة اللعب • نصائح • صورة الدور • رابط الويكي.",
+        inline=False,
+    )
+    embed.add_field(
+        name="3️⃣ تنقّل بين الصفحات",
+        value="«⬅️ السابق» و«التالي ➡️» للتنقل، ورقم الصفحة في الوسط يخبرك بموقعك من 9 صفحات.",
+        inline=False,
+    )
+    embed.add_field(
+        name="4️⃣ أو صفِّ حسب الفئة",
+        value=(
+            "🟢 الإوز • 🔴 البط • 🟡 المحايدون • 📖 كل الأدوار — تعرض فئة واحدة فقط، "
+            "وزر «🎲 دور عشوائي» يعطيك دوراً فوراً بلا بحث."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔎 أو ابحث باسم الدور",
+        value="اكتب ‎/دور‎ ثم مطلع الاسم (بالعربي أو الإنجليزي) — يقترحه فوراً ويعرض بطاقته بلا تنقل.",
+        inline=False,
+    )
+    embed.add_field(
+        name="⌨️ أسماء الأوامر",
+        value=(
+            "‎/help‎ و‎/مساعدة‎ لنفس هذا الشرح (اكتب أيّهما شئت) • ‎/roles‎ للوحة الأدوار "
+            "• ‎/دور‎ للبحث الفوري بالاسم."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎨 دلالة الألوان",
+        value="🟢 أخضر = إوز • 🔴 أحمر = بط • 🟡 أصفر/رمادي = محايد — ولون بطاقة الدور يدلّ على فئته.",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 خصوصيتك",
+        value="تنقلك في اللوحة يفتح **نسخة خاصة بك**، فلا يتغيّر شكل اللوحة عند بقية الروم.",
+        inline=False,
+    )
+    embed.add_field(
+        name="🛠️ للمشرفين",
+        value=(
+            "‎/roles‎ مع خيار الروم ينشر اللوحة في روم آخر (يحتاج صلاحية **إدارة الرسائل**).\n"
+            "ولو تعطّل أي زر، أعد إرسال اللوحة بـ ‎/roles‎."
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text="اكتب ‎/help‎ أو ‎/مساعدة‎ في أي وقت لعرض هذا الشرح", icon_url=BRAND["logo"]
+    )
     return embed
 
 
@@ -1651,6 +1644,20 @@ def guild_allowed(interaction: discord.Interaction) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+async def send_role_card(interaction: discord.Interaction, role_key: str) -> None:
+    """يرسل بطاقة الدور للضاغط وحده، ولو رفض ديسكورد الرسالة (إيموجي مخصص قديم)
+    يعيدها بالإيموجي العام بدل أن يرى المستخدم رسالة خطأ غامضة."""
+    try:
+        await interaction.response.send_message(
+            embed=build_role_embed(role_key, interaction.guild_id), ephemeral=True
+        )
+    except discord.HTTPException as error:
+        log.warning(
+            "فشل عرض بطاقة %s (%s) — سأعيدها بالإيموجي العام: %s", role_key, error.status, error
+        )
+        await interaction.response.send_message(embed=build_role_embed(role_key), ephemeral=True)
+
+
 class RoleButton(discord.ui.Button):
     """زر دور واحد: الإجابة تظهر للضاغط فقط (ephemeral)."""
 
@@ -1663,8 +1670,8 @@ class RoleButton(discord.ui.Button):
         }
         super().__init__(
             label=role["name_ar"],
-            # إيموجي السيرفر المخصص (صورة الدور) إن كانت مرفوعة، وإلا الإيموجي العام
-            emoji=icon_for(role_key, guild_id),
+            # إيموجي السيرفر المخصص (صورة الدور) إن كانت مرفوعة وصالحة، وإلا الإيموجي العام
+            emoji=button_emoji(role_key, guild_id),
             style=styles.get(role["team"], discord.ButtonStyle.secondary),
             custom_id=f"ggd:role:{role_key}"[:100],
             row=row,
@@ -1686,9 +1693,7 @@ class RoleButton(discord.ui.Button):
             return
 
         # ⬅️ السطر الأهم: ephemeral=True تعني أن الرسالة للضاغط وحده
-        await interaction.response.send_message(
-            embed=build_role_embed(self.role_key, interaction.guild_id), ephemeral=True
-        )
+        await send_role_card(interaction, self.role_key)
 
 
 class RoleBoardView(discord.ui.View):
@@ -1783,22 +1788,29 @@ class RoleBoardView(discord.ui.View):
             await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
             return
 
-        guild_id = interaction.guild_id
+        try:
+            await self._render_board(interaction, page, team)
+        except discord.HTTPException as error:
+            # أشهر سبب لرفض الرسالة كاملة: إيموجي مخصص صار قديماً (حُذف من السيرفر أو جاء
+            # من خريطة سيرفر آخر). فنعيد المحاولة بالإيموجي العام بدل أن يتعطّل التنقل.
+            log.warning("فشل عرض اللوحة (%s) — سأعيد المحاولة بالإيموجي العام: %s", error.status, error)
+            await self._render_board(interaction, page, team, plain=True)
+
+    async def _render_board(
+        self, interaction: discord.Interaction, page: int, team: Optional[str], plain: bool = False
+    ) -> None:
+        """يرسل اللوحة أو يعدّلها في مكانها. ‎plain=True‎ تتجاهل إيموجيات السيرفر المخصصة."""
+        guild_id = None if plain else interaction.guild_id
+        embed = build_panel_embed(page, team, private=True, guild_id=guild_id)
+        view = RoleBoardView(page, team, guild_id=guild_id)
+
         message = interaction.message
         is_public = message is None or not message.flags.ephemeral
-
         if is_public:
-            await interaction.response.send_message(
-                embed=build_panel_embed(page, team, private=True, guild_id=guild_id),
-                view=RoleBoardView(page, team, guild_id=guild_id),
-                ephemeral=True,
-            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
 
-        await interaction.response.edit_message(
-            embed=build_panel_embed(page, team, private=True, guild_id=guild_id),
-            view=RoleBoardView(page, team, guild_id=guild_id),
-        )
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def _go_prev(self, interaction: discord.Interaction) -> None:
         await self._show_board(interaction, max(0, self.page - 1), self.team)
@@ -1818,15 +1830,17 @@ class RoleBoardView(discord.ui.View):
             return
         # العشوائي يحترم التصفية الحالية: تصفية الإوز لا تعطيك بطة
         picked = random.choice(filtered_role_keys(self.team))
-        await interaction.response.send_message(
-            embed=build_role_embed(picked, interaction.guild_id), ephemeral=True
-        )
+        await send_role_card(interaction, picked)
 
     async def on_error(
         self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item
     ) -> None:
         log.exception("خطأ في زر %s: %s", type(item).__name__, error)
         message = "⚠️ حدث خطأ غير متوقّع، جرّب مرة أخرى."
+        if isinstance(error, discord.HTTPException):
+            # رمز الخطأ مختصر ومفيد جداً للتشخيص: 50035 مكوّن غير صالح، 10014 إيموجي محذوف،
+            # 10062 التفاعل انتهت صلاحيته. التفاصيل الكاملة في سجلات البوت.
+            message += f"\n`{error.status}`" + (f" • `{error.code}`" if error.code else "")
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(message, ephemeral=True)
@@ -1877,10 +1891,13 @@ async def setup_hook() -> None:
 @client.event
 async def on_ready() -> None:
     log.info("✅ البوت جاهز: %s | السيرفرات: %d", client.user, len(client.guilds))
+    # بعد معرفة إيموجيات السيرفرات الحقيقية: نُنظّف الخريطة من أي إيموجي محذوف،
+    # فلا يرفض ديسكورد رسالة اللوحة بسبب إشارة لإيموجي غير موجود.
+    prune_missing_emojis(client.guilds)
     if ENABLE_PREFIX_COMMANDS:
-        log.info("تم تفعيل أمر البريفكس !roles")
+        log.info("تم تفعيل أوامر البريفكس !roles و !help")
     else:
-        log.info("أمر !roles معطّل (يمكن تفعيله بـ ENABLE_PREFIX_COMMANDS=true)")
+        log.info("أوامر البريفكس معطّلة (يمكن تفعيلها بـ ENABLE_PREFIX_COMMANDS=true)")
 
 
 @client.event
@@ -1912,7 +1929,15 @@ async def roles_slash(
 
     # إرسال اللوحة في نفس الروم: الرسالة عامة، لكن كل إجابة زر تبقى خاصة بالضاغط
     if channel is None or channel.id == interaction.channel_id:
-        await interaction.response.send_message(embed=embed, view=view)
+        try:
+            await interaction.response.send_message(embed=embed, view=view)
+        except discord.HTTPException as error:
+            # إيموجي مخصص قديم (حُذف من السيرفر مثلاً) يُسقط الرسالة كاملة بخطأ من ديسكورد،
+            # فنرسل اللوحة بالإيموجي العام بدل أن يبقى المستخدم بلا لوحة أصلًا.
+            log.warning("فشل إرسال اللوحة (%s) — سأرسلها بالإيموجي العام: %s", error.status, error)
+            await interaction.response.send_message(
+                embed=build_panel_embed(0), view=RoleBoardView(0)
+            )
         return
 
     # إرسال إلى روم آخر: نتأكد من صلاحيات المستخدم والبوت قبل النشر
@@ -1984,55 +2009,35 @@ async def role_slash(interaction: discord.Interaction, query: str) -> None:
     )
 
 
-@client.tree.command(name="إيموجيات", description="🖼️ ارفع صور الأدوار كإيموجيات في السيرفر لتظهر على الأزرار")
-@app_commands.describe(remove="احذف إيموجيات البوت المرفوعة بدل رفعها")
-@app_commands.guild_only()
-@app_commands.default_permissions(manage_guild=True)
-async def emojis_slash(interaction: discord.Interaction, remove: bool = False) -> None:
-    """تهيئة الإيموجيات المخصصة: ترفع صور الأدوار (128×128 PNG) وتحفظ خريطتها."""
+# ─────────────────────────‏ أوامر المساعدة والاختصار ─────────────────────────‏
+
+# لماذا اسمان لنفس البطاقة؟ لأن معظم اللاعبين يكتبون ‎/help‎ تلقائياً، وأمر عربي واحد
+# باسم «مساعدة» لا يكفي: من كتب ‎/help‎ يظن أن البوت بلا شرح أصلاً. وبدل الاعتماد على
+# الترجمة التلقائية للاسم (name_localizations) — وهي تعرض العربية ولا تضمن أن كتابة
+# help تكفي — نسجّل الاسمين صراحةً فيعمل أيهما كتبه المستخدم، والنص عربي في الحالتين.
+HELP_DESCRIPTION = "❓ شرح بالعربي: كيف تستخدم البوت خطوة بخطوة"
+
+
+async def _send_help_card(interaction: discord.Interaction) -> None:
+    """يرسل بطاقة المساعدة العربية للضاغط وحده — يستدعيه الاسمان ‎/help‎ و‎/مساعدة‎."""
     if not guild_allowed(interaction):
         await interaction.response.send_message("❌ هذا البوت غير مخصّص لهذا السيرفر.", ephemeral=True)
         return
-    guild = interaction.guild
-    if guild is None:
-        return
+    await interaction.response.send_message(embed=build_help_embed(), ephemeral=True)
 
-    if not remove and not guild.me.guild_permissions.manage_expressions:
-        await interaction.response.send_message(
-            "❌ أحتاج صلاحية **إدارة التعبيرات (Manage Expressions)** لرفع الإيموجيات.\n"
-            "أعد دعوتي بهذا الرابط (يحتوي الصلاحية الجديدة) ثم جرّب مرة أخرى:\n"
-            f"{invite_url()}",
-            ephemeral=True,
-        )
-        return
 
-    await interaction.response.defer(ephemeral=True)
+@client.tree.command(name="help", description=HELP_DESCRIPTION)
+@app_commands.guild_only()
+async def help_slash(interaction: discord.Interaction) -> None:
+    """أمر ‎/help‎ — الاسم الذي يكتبه الناس تلقائياً، ونصّه عربي كامل."""
+    await _send_help_card(interaction)
 
-    if remove:
-        result = await delete_role_emojis(guild)
-        summary = (
-            f"🧹 حذفت **{result['deleted']}** إيموجي"
-            + (f" • فشل حذف {result['failed']}" if result["failed"] else "")
-            + "\nعادت الأزرار للإيموجي العام — أعد إرسال اللوحة بـ ‎/roles‎."
-        )
-        await interaction.followup.send(summary, ephemeral=True)
-        return
 
-    result = await upload_role_emojis(guild)
-    lines = [
-        f"✅ رفعت **{len(result['added'])}** إيموجي جديد",
-        f"♻️ موجود سابقاً: **{len(result['reused'])}**",
-    ]
-    if result["failed"]:
-        lines.append(f"⚠️ فشل رفع {len(result['failed'])}: " + "، ".join(result["failed"][:8]))
-    if result["no_slot"]:
-        lines.append(
-            f"📦 لا توجد مقاعد كافية ({result['free_slots']} من {result['limit']}): "
-            f"بقي {len(result['no_slot'])} دوراً بالإيموجي العام — تزيد المقاعد بترقية السيرفر "
-            "(Boost) أو بحذف إيموجيات قديمة، ثم أعد الأمر."
-        )
-    lines.append("👉 أعد إرسال اللوحة بـ ‎/roles‎ لترى صور الأدوار على الأزرار.")
-    await interaction.followup.send("\n".join(lines), ephemeral=True)
+@client.tree.command(name="مساعدة", description=HELP_DESCRIPTION)
+@app_commands.guild_only()
+async def help_ar_slash(interaction: discord.Interaction) -> None:
+    """أمر ‎/مساعدة‎ — نفس البطاقة العربية لكن باسم عربي لمن يكتب بالعربية."""
+    await _send_help_card(interaction)
 
 
 if ENABLE_PREFIX_COMMANDS:
@@ -2049,6 +2054,14 @@ if ENABLE_PREFIX_COMMANDS:
         await ctx.send(
             embed=build_panel_embed(0, guild_id=guild_id), view=RoleBoardView(0, guild_id=guild_id)
         )
+
+    @client.command(name="help")
+    @commands.guild_only()
+    async def help_prefix(ctx: commands.Context) -> None:
+        """!help — نفس بطاقة المساعدة العربية التي يعرضها ‎/help‎ و‎/مساعدة‎."""
+        if ctx.guild and ALLOWED_GUILD_IDS and ctx.guild.id not in ALLOWED_GUILD_IDS:
+            return
+        await ctx.send(embed=build_help_embed())
 
 
 @client.event

@@ -61,27 +61,6 @@ def check_one(item: Tuple[str, str]) -> Tuple[str, str, str]:
         return key, f"{type(error).__name__}: {error}"[:120], url
 
 
-def check_emoji_ready(item: Tuple[str, str]) -> Tuple[str, str]:
-    """يفحص النسخة التي يرفعها البوت كإيموجي مخصص: PNG صغيرة بحجم يقبله ديسكورد.
-
-    لماذا فحص منفصل؟ لأن صورة العرض تعمل كـ webp، أما ديسكورد فيرفض webp
-    في الإيموجيات ويرفض أي صورة أكبر من 256KB — وكلاهما لا يظهر إلا عند الرفع.
-    """
-    key, url = item
-    try:
-        request = urllib.request.Request(bot.emoji_image_url(url), headers=HEADERS)
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            content_type = response.headers.get("Content-Type", "")
-            data = response.read(bot.EMOJI_MAX_BYTES + 1)
-    except Exception as error:  # noqa: BLE001 - نريد عرض السبب كما هو للمستخدم
-        return key, f"{type(error).__name__}: {error}"[:120]
-    if not content_type.startswith("image/png"):
-        return key, f"ليست PNG ({content_type}) — ديسكورد يرفضها كإيموجي"
-    if len(data) > bot.EMOJI_MAX_BYTES:
-        return key, f"حجمها {len(data) // 1024}KB وأكبر من حد ديسكورد (256KB)"
-    return key, "OK"
-
-
 def collect_urls() -> Dict[str, str]:
     """كل الروابط التي يجب أن تعمل: صور الأدوار + صور هوية البوت (بانر وشعار).
 
@@ -120,30 +99,13 @@ def main(argv: List[str]) -> int:
         if show_all or reason != "OK":
             print(f"  {'✅' if reason == 'OK' else '❌'} {key:<16} {reason}")
 
-    # فحص ثانٍ: هل تصلح كل صورة أن تُرفع كإيموجي مخصص في السيرفر؟
-    role_urls = {key: role["image"] for key, role in bot.ROLES.items() if role.get("image")}
-    print("\n" + "─" * 52)
-    print(f"🖼️ فحص جاهزية الإيموجيات المخصصة ({bot.EMOJI_IMAGE_SIZE}×{bot.EMOJI_IMAGE_SIZE} PNG)...")
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        emoji_results = list(pool.map(check_emoji_ready, role_urls.items()))
-    emoji_broken = [(key, reason) for key, reason in emoji_results if reason != "OK"]
-    for key, reason in emoji_results:
-        if show_all or reason != "OK":
-            print(f"  {'✅' if reason == 'OK' else '❌'} {key:<16} {reason}")
-
     print("\n" + "─" * 52)
     if broken:
         print(f"❌ توجد {len(broken)} صورة مكسورة — صحّح روابطها داخل bot.py")
         for key, reason in broken:
             print(f"   • {key}: {reason}")
         return 1
-    if emoji_broken:
-        print(f"❌ {len(emoji_broken)} صورة لا تصلح إيموجياً مخصصاً (أمر ‎/إيموجيات‎ سيتجاوزها):")
-        for key, reason in emoji_broken:
-            print(f"   • {key}: {reason}")
-        return 1
-    print(f"✅ كل الصور تصلح إيموجيات مخصصة ({len(role_urls)} صورة PNG صغيرة).")
-    print("✅ كل روابط الصور تعمل بشكل صحيح.")
+    print(f"✅ كل روابط الصور تعمل بشكل صحيح ({len(urls)} رابطاً).")
     if without_image:
         print(f"ℹ️  {len(without_image)} دوراً بلا صورة رسمية (تظهر البطاقة بدونه): "
               + "، ".join(without_image))

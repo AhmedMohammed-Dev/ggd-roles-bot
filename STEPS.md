@@ -191,14 +191,12 @@ python bot.py
 3. بدّله في هذا الرابط وافتحه في المتصفح:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&permissions=1073761280&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&permissions=19456&scope=bot%20applications.commands
 ```
 
 4. اختر سيرفرك → **Authorize**.
-   - 💡 الصلاحيات هنا للقراءة والكتابة + **إدارة التعبيرات** (لأمر `/إيموجيات` الذي يعرض
-     صور الأدوار على الأزرار). **لا تعطِ البوت صلاحية Administrator أبداً.**
-   - إن أردت أعلى تقييد: استبدل الرقم `1073761280` بـ `19456` — كل شيء سيعمل عدا
-     الإيموجيات المخصصة (تبقى الأزرار بالإيموجي العام).
+   - 💡 الرقم `19456` = عرض الروم + إرسال الرسائل + إدراج روابط (Embed) — وهذا كل ما
+     يحتاجه البوت. **لا تعطِ البوت صلاحية Administrator أبداً.**
 
 ### الآن جرّبه
 
@@ -210,7 +208,19 @@ https://discord.com/api/oauth2/authorize?client_id=ضع_الـ_CLIENT_ID_هنا&
 
 ستظهر لوحة الأزرار. اضغط أي دور → ستأتيك بطاقة الدور **لك وحدك** (لا يراها أحد غيرك) ✅
 
-> إن أردت أيضاً أمر `!roles`: اجعل `ENABLE_PREFIX_COMMANDS=true` في `.env`، ثّم فعّل من لوحة
+وإن أردت شرحاً للاستخدام اكتب أيّاً من الاثنين (نفس البطاقة العربية):
+
+```
+/help
+```
+
+أو
+
+```
+/مساعدة
+```
+
+> إن أردت أيضاً الأمرين `!roles` و `!help`: اجعل `ENABLE_PREFIX_COMMANDS=true` في `.env`، ثّم فعّل من لوحة
 > المطوّرين → Bot → **Message Content Intent** ثم أعد تشغيل البوت.
 
 ---

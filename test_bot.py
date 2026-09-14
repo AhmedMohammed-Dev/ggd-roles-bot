@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import json
 import os
 import re
 import tempfile
@@ -342,17 +343,11 @@ class TestBoardLook(unittest.TestCase):
 
 
 class TestCustomEmojis(unittest.TestCase):
-    """إيموجيات السيرفر المخصصة: صورة كل دور تظهر على زرّه بدل الإيموجي العام."""
+    """إيموجيات السيرفر: لو كانت مرفوعة من قبل تظهر صورة الدور على زرّه، وإلا الإيموجي العام.
 
-    def test_every_role_image_is_requested_as_small_png(self):
-        """ديسكورد يرفض webp وأي صورة أكبر من 256KB، وويكي اللعبة تُرجع webp افتراضياً."""
-        for key, role in bot.ROLES.items():
-            if not role.get("image"):
-                continue
-            url = bot.emoji_image_url(role["image"])
-            self.assertIn("format=png", url, key)
-            self.assertIn(f"scale-to-width-down/{bot.EMOJI_IMAGE_SIZE}", url, key)
-            self.assertEqual(url.count("scale-to-width-down"), 1, f"مضاعفة التصغير في {key}")
+    البوت لم يعد يرفع إيموجيات بنفسه (لا يوجد أمر ‎/إيموجيات‎) — يقرأ الخريطة المحفوظة
+    من قبل ويعرضها، وهذا ما يتحقق منه هذا القسم.
+    """
 
     def test_slugs_are_valid_unique_discord_emoji_names(self):
         slugs = [bot.emoji_slug(key) for key in bot.ROLES]
@@ -360,18 +355,6 @@ class TestCustomEmojis(unittest.TestCase):
         for slug in slugs:
             self.assertRegex(slug, r"^[a-z0-9_]{2,32}$")
             self.assertTrue(slug.startswith(bot.EMOJI_NAME_PREFIX))
-
-    def test_candidates_skip_imageless_and_already_uploaded_roles(self):
-        everything = bot.emoji_upload_candidates(set())
-        with_image = {key for key, role in bot.ROLES.items() if role.get("image")}
-        self.assertEqual(sorted(everything), sorted(with_image))
-        self.assertEqual(everything[0], "goose", "أولوية الرفع تبدأ بأدوار الصفحة الأولى")
-
-        uploaded = {bot.emoji_slug("goose"), bot.emoji_slug("sheriff")}
-        remaining = bot.emoji_upload_candidates(uploaded)
-        self.assertNotIn("goose", remaining)
-        self.assertNotIn("sheriff", remaining)
-        self.assertEqual(len(remaining), len(with_image) - 2)
 
     def test_falls_back_to_the_unicode_emoji_without_custom_ones(self):
         self.assertEqual(bot.icon_for("sheriff"), bot.ROLES["sheriff"]["emoji"])
@@ -395,12 +378,12 @@ class TestCustomEmojis(unittest.TestCase):
             self.assertIn("999", card.author.icon_url or "")
             self.assertIn("<:ggd_sheriff:999>", card.title)
 
-    def test_emoji_map_round_trip_on_disk(self):
+    def test_saved_map_is_read_from_disk(self):
         mapping = {"1": {"goose": {"id": "5", "name": "ggd_goose", "animated": False}}}
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "role_emojis.json"
+            path.write_text(json.dumps(mapping), encoding="utf-8")
             with mock.patch.object(bot, "EMOJI_MAP_PATH", path):
-                self.assertTrue(bot.save_emoji_map(mapping))
                 self.assertEqual(bot.load_emoji_map(), mapping)
 
     def test_broken_emoji_map_file_is_ignored(self):
@@ -410,15 +393,90 @@ class TestCustomEmojis(unittest.TestCase):
             with mock.patch.object(bot, "EMOJI_MAP_PATH", path):
                 self.assertEqual(bot.load_emoji_map(), {})
 
-    def test_invite_url_requests_manage_expressions(self):
-        self.assertEqual(bot.BOT_PERMISSIONS, 19456 + (1 << 30))
-        self.assertIn(f"permissions={bot.BOT_PERMISSIONS}", bot.invite_url(12345))
-
-    def test_new_commands_are_registered_with_arabic_names(self):
+    def test_registered_commands(self):
+        """‎/help‎ و‎/مساعدة‎ كلاهما مسجّل: من كتب help لا يجد الأمر غائباً، ومن كتب بالعربي يجده."""
         names = {command.name for command in bot.client.tree.get_commands()}
         self.assertIn("roles", names)
         self.assertIn("دور", names)
-        self.assertIn("إيموجيات", names)
+        self.assertIn("help", names, "‎/help‎ هو الاسم الذي يكتبه اللاعب تلقائياً")
+        self.assertIn("مساعدة", names, "‎/مساعدة‎ لمن يكتب بالعربي")
+        self.assertNotIn("إيموجيات", names, "أمر رفع الإيموجيات أُزيل بقرار من صاحب السيرفر")
+
+    def test_help_description_is_arabic(self):
+        """وصف الأمرين (الذي يظهر في قائمة ‎/‎) مكتوب بالعربي أيضاً."""
+        commands = [c for c in bot.client.tree.get_commands() if c.name in ("help", "مساعدة")]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertRegex(command.description, r"[\u0600-\u06FF]", command.name)
+
+
+class TestHelpCommand(unittest.TestCase):
+    """بطاقة المساعدة (‎/help‎ و‎/مساعدة‎): تشرح للعضو الجديد بالعربي كيف يتعامل مع البوت."""
+
+    def test_every_step_appears_in_the_card(self):
+        embed = bot.build_help_embed()
+        text = "\n".join(
+            [embed.title or "", embed.description or "", embed.footer.text or ""]
+            + [f"{field.name}\n{field.value}" for field in embed.fields]
+        )
+        for wanted in (
+            "/help",
+            "/roles",
+            "/دور",
+            "المحايدون",
+            "عشوائي",
+            "نسخة خاصة بك",
+            "للمشرفين",
+            "مساعدة",
+        ):
+            self.assertIn(wanted, text, wanted)
+
+    def test_both_command_names_show_the_same_arabic_card(self):
+        """الاسمان يؤديان لنفس البطاقة تماماً — لا نسخة إنجليزية ولا اختلاف في النص."""
+        cards = []
+        for command in (bot.help_slash, bot.help_ar_slash):
+            interaction = FakeInteraction(ephemeral=False)
+            asyncio.run(command.callback(interaction))
+            cards.append(interaction.response.sent["embed"])
+        self.assertEqual(cards[0].title, cards[1].title)
+        self.assertEqual(
+            [f.value for f in cards[0].fields], [f.value for f in cards[1].fields]
+        )
+
+    def test_the_card_is_written_in_arabic(self):
+        """كل نصوص البطاقة عربية (بعد إيموجي أو رمز الخطوة) وبلا جمل إنجليزية.
+
+        الاستثناء الوحيد: أسماء الأوامر نفسها (‎/help‎ و‎/roles‎) فتُكتب كما هي بالإنجليزية،
+        لأن المستخدم لا يمكنه كتابتها بالعربي في خانة الأمر.
+        """
+        embed = bot.build_help_embed()
+        arabic = re.compile(r"[\u0600-\u06FF]")
+        parts = [embed.title or "", embed.description or "", embed.footer.text or ""]
+        for field in embed.fields:
+            self.assertTrue(arabic.search(field.name), f"عنوان الحقل ليس عربياً: {field.name}")
+            self.assertTrue(arabic.search(field.value), f"نص الحقل ليس عربياً: {field.name}")
+            parts.append(f"{field.name} {field.value}")
+        self.assertTrue(arabic.search(parts[0]))
+        latin = set(re.findall(r"[A-Za-z]{2,}", " ".join(parts)))
+        self.assertEqual(latin - {"help", "roles"}, set(), f"كلمات إنجليزية غريبة: {latin}")
+
+    def test_help_card_fits_discord_limits(self):
+        embed = bot.build_help_embed()
+        self.assertLessEqual(len(embed), 6000)
+        self.assertLessEqual(len(embed.title or ""), 256)
+        self.assertLessEqual(len(embed.description or ""), 4096)
+        self.assertLessEqual(len(embed.fields), 25)
+        for field in embed.fields:
+            self.assertLessEqual(len(field.name), 256)
+            self.assertLessEqual(len(field.value), 1024)
+        self.assertEqual(embed.author.icon_url, bot.BRAND["logo"])
+
+    def test_help_is_private_to_the_person_who_asks(self):
+        interaction = FakeInteraction(ephemeral=False)
+        asyncio.run(bot.help_slash.callback(interaction))
+        self.assertTrue(interaction.response.sent["ephemeral"])
+        card = interaction.response.sent["embed"]
+        self.assertEqual(card.title, bot.build_help_embed().title)
 
 
 class TestRoleSearch(unittest.TestCase):
@@ -538,6 +596,144 @@ class TestPrivateNavigation(unittest.TestCase):
         labels = [item.label for item in private.children]
         for wanted in ("⬅️ السابق", "التالي ➡️", "🎲 دور عشوائي", "🟢 الإوز", "📖 كل الأدوار"):
             self.assertIn(wanted, labels)
+
+
+class TestButtonEmojiSafety(unittest.TestCase):
+    """إيموجي زر واحد يرفضه ديسكورد يُسقط رسالة اللوحة **كاملة**، فيتعطّل «التالي» بلا سبب ظاهر.
+
+    هذا ما حدث فعلاً: دور «الغراب (المتحوّل)» كان بإيموجي مركّب برابط ZWJ (🐦‍⬛)، وديسكورد
+    يرفض هذا الشكل داخل الأزرار (خطأ 50035)، فكانت آخر صفحة من تصفية «المحايدون» لا تُفتح أبداً.
+    """
+
+    @staticmethod
+    def _emoji_name(emoji) -> str:
+        return emoji if isinstance(emoji, str) else (emoji.name or "")
+
+    def test_no_role_uses_a_zwj_emoji(self):
+        for key, role in bot.ROLES.items():
+            self.assertNotIn("\u200d", role["emoji"], f"الدور {key} بإيموجي مركّب يرفضه ديسكورد")
+
+    def test_every_role_button_emoji_is_component_safe(self):
+        for key in bot.ROLES:
+            name = self._emoji_name(bot.RoleButton(key, row=0).emoji)
+            self.assertTrue(name.strip(), key)
+            self.assertNotIn("\u200d", name, key)
+            self.assertLessEqual(len(name), 32, f"اسم إيموجي {key} أطول من حدّ ديسكورد")
+
+    def test_no_page_payload_carries_a_zwj_emoji(self):
+        """أقرب فحص للواقع: نُسلسل كل صفحة (وكل تصفية) كما يستلمها ديسكورد فعلاً.
+
+        الاختبار السابق يفحص الإيموجي واحداً واحداً؛ هذا يفحص الحمولة النهائية للصفحة
+        كلها، فهو يلتقط أي إيموجي مركّب يضيفه الدور الجديد تلقائياً قبل أن يصل للسيرفر.
+        """
+        for team in (None, *bot.TEAMS):
+            for page in range(bot.total_pages(team)):
+                payload = json.dumps(
+                    bot.RoleBoardView(page, team).to_components(), ensure_ascii=False
+                )
+                self.assertNotIn("\u200d", payload, f"{team} صفحة {page}")
+                self.assertNotIn('"name": ""', payload, f"{team} صفحة {page}")
+
+    def test_zwj_sequences_are_trimmed_to_the_base_emoji(self):
+        self.assertEqual(bot.safe_component_emoji("🐦‍⬛"), "🐦")
+        self.assertEqual(bot.safe_component_emoji("🏳️‍🌈"), "🏳️")
+        self.assertEqual(bot.safe_component_emoji("🦆"), "🦆")
+
+    def test_broken_saved_emoji_falls_back_to_the_general_one(self):
+        """خريطة قديمة أو محذوفة (أو من سيرفر آخر) لا يجب أن تُسقط اللوحة."""
+        mapping = {
+            "7": {
+                "crow": {"id": "ليس رقماً", "name": "ggd_crow"},  # معرّف غير صالح
+                "raven": {"id": "12", "name": "اسم غير صالح!"},   # اسم غير صالح
+                "owl": "مدخل تالف",                                 # ليس قاموساً
+            }
+        }
+        with mock.patch.dict(bot._emoji_map, mapping, clear=True):
+            for key in ("crow", "raven", "owl"):
+                self.assertIsNone(bot.custom_icon(key, 7), key)
+                self.assertEqual(bot.button_emoji(key, 7), bot.ROLES[key]["emoji"], key)
+
+    @staticmethod
+    def _guild_emoji(name: str):
+        emoji = mock.Mock()
+        emoji.name = name
+        return emoji
+
+    def test_stale_map_entries_are_dropped_against_the_real_guild_emojis(self):
+        """خريطة فيها إيموجي محذوف تُسقط الرسالة كاملة — فننظّفها عند التشغيل."""
+        mapping = {
+            "3": {
+                "goose": {"id": "10", "name": "ggd_goose"},
+                "sheriff": {"id": "11", "name": "ggd_sheriff"},  # حُذف من السيرفر
+                "duck": "مدخل تالف",                              # ليس قاموساً
+            }
+        }
+        guild = mock.Mock(id=3, emojis=[self._guild_emoji("ggd_goose")])
+        with mock.patch.dict(bot._emoji_map, mapping, clear=True):
+            self.assertEqual(bot.prune_missing_emojis([guild]), 2)
+            self.assertEqual(sorted(bot._emoji_map["3"]), ["goose"])
+
+    def test_pruning_is_skipped_when_the_guild_emojis_are_not_visible(self):
+        """قائمة إيموجيات فارغة تعني أن البوت لا يراها — لا نخسر صور الأزرار بلا دليل."""
+        mapping = {"3": {"goose": {"id": "10", "name": "ggd_goose"}}}
+        guild = mock.Mock(id=3, emojis=[])
+        with mock.patch.dict(bot._emoji_map, mapping, clear=True):
+            self.assertEqual(bot.prune_missing_emojis([guild]), 0)
+            self.assertEqual(bot._emoji_map["3"], mapping["3"])
+
+    def test_role_card_is_retried_without_guild_emojis(self):
+        """بطاقة الدور أيضاً: لو رفضها ديسكورد بسبب إيموجي قديم، نعرضها بالإيموجي العام."""
+
+        class RejectingOnce(FakeResponse):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cards = []
+
+            async def send_message(self, content=None, **kwargs) -> None:
+                self.cards.append(kwargs.get("embed"))
+                if len(self.cards) == 1:
+                    raise discord.HTTPException(
+                        mock.Mock(status=400, reason="Bad Request"),
+                        {"code": 10014, "message": "Unknown Emoji"},
+                    )
+                await super().send_message(content, **kwargs)
+
+        interaction = FakeInteraction(ephemeral=True)
+        interaction.response = RejectingOnce()
+        mapping = {str(interaction.guild_id): {"sheriff": {"id": "5", "name": "ggd_sheriff"}}}
+        with mock.patch.dict(bot._emoji_map, mapping, clear=True):
+            asyncio.run(bot.send_role_card(interaction, "sheriff"))
+
+        self.assertEqual(len(interaction.response.cards), 2)
+        self.assertIn("<:ggd_sheriff:5>", interaction.response.cards[0].title)
+        self.assertNotIn("ggd_sheriff", interaction.response.cards[1].title)
+
+    def test_an_emoji_discord_rejected_is_retried_without_guild_emojis(self):
+        """لو رفض ديسكورد الرسالة بسبب إيموجي مخصص، نعيد المحاولة بالإيموجي العام."""
+
+        class RejectingOnce(FakeResponse):
+            def __init__(self) -> None:
+                super().__init__()
+                self.edits = 0
+
+            async def edit_message(self, **kwargs) -> None:
+                self.edits += 1
+                if self.edits == 1:
+                    raise discord.HTTPException(
+                        mock.Mock(status=400, reason="Bad Request"),
+                        {"code": 50035, "message": "Invalid Form Body"},
+                    )
+                await super().edit_message(**kwargs)
+
+        interaction = FakeInteraction(ephemeral=True)
+        interaction.response = RejectingOnce()
+        with mock.patch.dict(bot._emoji_map, {"2": {"crow": {"id": "5", "name": "ggd_crow"}}}, clear=True):
+            asyncio.run(bot.RoleBoardView(0, "neutral")._go_next(interaction))
+
+        self.assertEqual(interaction.response.edits, 2)
+        sent_view = interaction.response.edited["view"]
+        self.assertIsNone(sent_view.guild_id, "المحاولة الثانية يجب ألا تستخدم إيموجيات السيرفر")
+        self.assertEqual(sent_view.page, 1)
 
 
 class TestKeepAlive(unittest.TestCase):
